@@ -25,7 +25,7 @@
 // Errors: max_abs, max_rel = max |x-ref| / max(|x|,|ref|) (golden.py
 // definition), norm = max_abs / max|ref|. Pass: norm <= tol.
 // L1/H1024 additionally validates a derivative-kink branch correction against
-// independent float64 math; raw CUDA errors are still printed. See GOLDWIDE.md.
+// independent float64 math; raw CUDA errors are still printed. See README.md, "Wide CUDA fixtures".
 //
 // Build/run: tests/metal/run_test_mingru.sh [golden_run_dir ...] [--bench]
 #import <Foundation/Foundation.h>

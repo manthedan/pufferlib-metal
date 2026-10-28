@@ -1,5 +1,5 @@
 #!/bin/bash
-# Leg 17 end-to-end gate: the backward dW overlap (concurrent windows) in
+# Backward-overlap end-to-end gate: the backward dW overlap (concurrent windows) in
 # its default (per-epoch auto policy), forced-on (PUF_METAL_BWD_OVERLAP=1)
 # and off (=0) modes must all reproduce the seed-1 score and checkpoint
 # sha256 prefix. Cartpole (H=32, 2 layers, fused dW

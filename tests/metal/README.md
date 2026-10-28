@@ -34,7 +34,7 @@ The authoritative `--list` has **59 default gates**:
 - Selected FP32/BF16 kernels, GEMM, MinGRU, PPO/Muon, custom encoders and CUDA
   train replay comparisons, including recorded tolerances and noise controls.
 - H64 and overlap end-to-end seed checks: scores and SHA-256 prefixes copied
-  unchanged from the original leg 13/17 helpers. Wide/large end-to-end gates
+  unchanged from the original H64/overlap seed helpers. Wide/large end-to-end gates
   require exact score/checkpoint agreement between generic, default and opt-out
   paths. H256 always uses tracked Breakout with explicit H256/L2/T64 geometry;
   it has no stored fixed reference to regenerate. H128 uses Freeway.
@@ -86,8 +86,34 @@ The absolute loss term accounts for the trainer's three-decimal display.
 Checkpoint hashes are recorded but are not expected to match for this path.
 All new seed runs use the existing `PUF_TEST_NO_INTERMEDIATE_LOG=1` control to
 make loss averaging independent of wall-clock logging cadence. These are
-selected finite-run checks, not long-training equivalence claims. Full results
-and observed differences are in [the leg 3 report](../../docs/dev/cleanup-leg3-report.md).
+selected finite-run checks, not long-training equivalence claims. The observed four-horizon results were:
+
+| Precision | Default / opt-out score | Score delta | Default / opt-out loss | Loss delta |
+|---|---|---|---|---|
+| BF16 | 9.465517044067383 / 9.504347801208496 | 0.03883075714111328 | 14.627 / 14.627 | 0 |
+| FP32 | 9.571005821228027 / 9.571005821228027 | 0 | 14.951 / 14.922 | 0.029 |
+
+Neither checkpoint pair is bit-identical. An exploratory 16-horizon comparison
+had score deltas 3.583954 (BF16) and 7.316452 (FP32), with relative L2 weight
+differences 0.07160 / 0.05887; four-horizon differences were 0.003462 / 0.001832.
+The shorter gate tests early numerical behavior; it does not establish long-run
+agreement or accept the longer run under a widened tolerance.
+
+Dispatch evidence distinguishes each alternate from a silent fallback:
+
+| Override | Required path evidence |
+|---|---|
+| `PUF_METAL_FUSED_NS=0` | Small fused NS disappears; wide dispatcher appears |
+| `PUF_METAL_MUON_NS_MMA=0` | Actual small-NS arguments change from mma=1 to mma=0 |
+| `PUF_METAL_MUON_BATCH=0` | Individual NS replaces batched NS |
+| `PUF_METAL_MUON_WIDE=0` | Generic GEMM replaces wide Muon at H64 |
+| `PUF_METAL_FUSED_DW=0` | Plain backward replaces fused backward/dW |
+| `PUF_METAL_STRICT_FEEDBACK=1` | Zero gated commits and positive strict-feedback joins; skipping joins fails a compiled mutation |
+| `PUF_METAL_LAZY_PROGRESS=0` | Zero gated commits versus positive default count |
+| `PUF_METAL_ROLLOUT_SPIN_US=50` | Positive combined spin hit/miss count versus zero default |
+
+These counters prove selection; timing-dependent counts are not fixed golden
+values. Strict-join counts exclude ordinary strict API operations.
 
 The IEEE seed build uses a test-only `xcrun` shim to add the define to every
 shader compile, and verifies the build log for all five sigmoid-bearing shader
@@ -147,8 +173,24 @@ GitHub caps release assets at 2 GiB, so the archive is split into two parts;
 `golden_bundle.json` lists them and pins the combined archive SHA256, size and
 public fixture contract. The fetcher downloads the parts in order into one
 resumable partial file and verifies the combined archive before extracting.
-[The packaging report](../../docs/dev/golden-bundle-report.md) records the actual
-archive, validation results and timings.
+The verified archive contains 10,059 files (678 manifests, 9,323 tensors and
+58 wide audit files), totaling 5,294,267,886 uncompressed bytes. The archive is
+3,190,932,528 bytes, SHA256
+`90c6375dab77e4634868ad780474068768ce610a92e8550e1f376caa50cae1e5`.
+The original package validation compared every installed file: 10,030 unchanged
+and 29 sanitized (28 logs plus their SHA inventory), with no tensor or manifest
+changes. There were 276 allowed prefix replacements; no actionable privacy
+matches remained. The source capture was unchanged.
+
+| Original bundle validation | Result | Time |
+|---|---|---:|
+| Package | 10,059 files | 531.550 s |
+| Local fetch with pinned metadata | PASS | 15.296 s |
+| Every installed file vs original/provenance | PASS | 9.456 s |
+| Full default suite against public bundle | 59 total: 58 PASS, 0 FAIL, 1 SKIP (`protein`), exit 0 | 1,891.478 s |
+
+The private cuRAND export is intentionally absent; public Protein runs. These
+are recorded validation results, not a replacement for checking a new download.
 
 ```sh
 # Defaults to <repo>/golden, just like run_all.sh.
@@ -214,8 +256,7 @@ PUF_BUNDLE_PRIVATE_TOKENS='private-user,private-host' \
 
 Private tokens can instead (or additionally) come from an untracked comma- or
 newline-separated file passed with `--private-tokens FILE`. Packaging prints a
-prominent warning when neither source supplies any tokens. Generic `/Users/`
-and `/home/` paths and email addresses are always scanned.
+prominent warning when neither source supplies any tokens. Generic macOS/Linux home-directory paths and email addresses are always scanned.
 
 The packager derives the exact file set from gate groups, `fixture_cases.json`,
 validated manifests and `fixture_contracts.json`, including all required wide
@@ -236,8 +277,9 @@ The `.tar.gz.scan.json` audit lists included/excluded files, original matches,
 remaining matches, and rewritten files. UTF-8 metadata, logs and source text
 are scanned; matches inside 64-character hex digests are reported as false
 positives. The only permitted sanitization is a CUDA reference checkout matching
-`/home/[A-Za-z0-9._-]+/metal_puffer_ref/` in `wide_reports/*.log`, replaced with
-`<cuda-ref>/`. The regex and original/sanitized SHA256 for every rewritten file are tracked in
+the recorded Linux home-directory checkout prefix in `wide_reports/*.log`,
+replaced with `<cuda-ref>/`. The exact regex and original/sanitized SHA256
+for every rewritten file are tracked in
 [`golden_sanitization.json`](golden_sanitization.json). These logs are capture
 provenance; gates use them only for SHA inventory checking.
 
@@ -251,7 +293,7 @@ either the recorded private originals or the already sanitized public files.
 The NVIDIA cuRAND-exported `protein/curand_sobol32.bin` is always excluded and
 must not be redistributed.
 Generate it privately on a CUDA host using
-[the Protein exporter](../metal_ref/README-protein.md):
+[the Protein exporter](../metal_ref/README.md#external-curand-protein-fixture):
 
 ```sh
 PUFFER_GOLDEN_DIR=/path/to/private/golden bash tests/metal_ref/export_protein_sobol.sh
@@ -293,11 +335,123 @@ scores or checkpoint hashes with output from the implementation under test.
 
 The tracked [FP32 reference harness](../metal_ref/README.md) documents generation
 with explicit `CUDA_HOME`/`NCCL_HOME`; no private sibling setup is required.
-[BF16 encoder provenance](../metal_ref/README-env-bf16.md) records historical
-reference branches and their generation commands. Those branch-specific BF16,
+[BF16 encoder provenance](../metal_ref/README.md#cuda-bf16-custom-encoder-references) records historical
+captures and their generation commands. Those branch-specific BF16,
 encoder and wide generation helpers are not all shipped here: full regeneration of every
 public bundle case is not yet available from this checkout alone. Packaging
 existing captures does not remove that limitation.
-[Wide fixture documentation](GOLDWIDE.md) describes the geometry, tolerances,
+[Wide fixture documentation](#wide-cuda-fixtures) describes the geometry, tolerances,
 independent controls and hash audit. [Robot-arm fixture documentation](fixtures/robot_arm/README.md)
 records the tracked trajectory capture procedure and precision variants.
+
+## Wide CUDA fixtures
+
+From the repository root, using the suite prerequisites above:
+
+```bash
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+# NumPy is required by compare_train_replay.py.
+export PUFFER_GOLDEN_DIR="${PUFFER_GOLDEN_DIR:-$PWD/golden}"
+tests/metal/run_test_goldwide.sh $PUFFER_GOLDEN_DIR
+```
+
+CPU/compiler validation without executing a Metal binary:
+
+```bash
+tests/metal/run_test_goldwide.sh --build-only
+python3 tests/metal/check_goldwide.py $PUFFER_GOLDEN_DIR
+```
+
+`--build-only` compiles both metallibs, five operation readers, two host control
+binaries, and Freeway and Tetris replay executables in each precision at
+nice 19. It exits before running any GPU work. The CPU audit checks all
+SHA-256 hashes, byte counts, precision tags, reset classes, required cases,
+independent-run equality and replay/live output equality. All golden files
+are read-only inputs.
+
+The bundle is `$PUFFER_GOLDEN_DIR/{wide_a,wide_b,wide_bf16,wide_bf16_b}`, with audits,
+source/config snapshots and determinism reports in `$PUFFER_GOLDEN_DIR/wide_reports`.
+The historical capture report is external to this repository; the bundle
+manifests and reports are the machine-readable provenance.
+
+The gate reuses existing numerical tolerances. FP32 gate/GEMM/Muon readers
+cover every matching case; the BF16 reader covers all operation cases. Both
+policy readers compare generic and eligible fused layers directly with CUDA.
+`PUF_GOLDWIDE_FUSED=1` requires the shipped H128/H256 T64 paths to run; rejected
+eligible launches fail. H512/H1024 fixtures automatically use fused functions
+when those widths become eligible, and explicitly print `path=generic` until
+then. Tetris H512/T128 uses the generic plain scan; the standalone scan
+fixtures exercise both plain and row kernels. The full train replay also runs
+with fused MinGRU enabled and disabled. Wide Muon cases additionally compare
+the wide optimizer kernel directly with CUDA and bitwise with the generic tail.
+
+Train inputs are `TAG/train_ENV/train_epoch3`; CUDA references are
+`TAG/replay_ENV/train_epoch3`. Replay references contain output tensors only;
+the full replayable inputs remain in both independent train captures. The new
+`replay-wide` command loads the compiled environment config with the recorded
+geometry overrides: 128 total agents and minibatch=128*horizon. Freeway is
+H128/L4/T64, Tetris H512/L2/T128; the other default settings are preserved.
+The original `replay` command and existing golden paths remain supported.
+
+Train comparisons preserve the existing two-perturbation noise-floor contract:
+float max error <= max(1e-5, 2*measured perturbation spread); integer/RNG tensors
+must match exactly. This is a stability gate, not a bitwise cross-device claim.
+Operation gates retain their existing bounds. CUDA run-to-run noise was zero.
+The wrapper creates a fresh output directory by default. If setting
+`PUFFER_GOLDWIDE_OUT` explicitly, choose a fresh directory: replay refuses
+existing train output directories. `--build-only` and the CPU audit do not
+establish a Metal numerical pass.
+
+The [parity investigation](../../docs/dev/parity-investigations.md#h1024-backward-discrepancy)
+records the measured diagnosis. The one-layer H1024 FP32 fixture lands within FP32 reduction error of the
+MinGRU hidden activation's derivative discontinuity at zero. Its reader
+reports raw CUDA gradient errors, then accounts for independently calculated
+derivative branch changes. This requires float64 validation of the encoder,
+projection, scan, each backward GEMM on its actual operands, and the CUDA
+final gradients. Sign changes must satisfy an FP32 dot-product error bound.
+The existing `1e-4` policy bound stays in effect after the analytic correction;
+independent reference checks use `1e-5`. Other widths retain direct comparison.
+`test_policy_kink` is a one-lane regression for identical forward values and
+fourfold derivative changes across zero.
+
+BF16 gate state comparisons retain the one-ulp bound, with a per-element
+float64 check for severe cancellation: both CUDA and Metal must be within
+one BF16 ulp of the correctly rounded independent result. No absolute floor
+or larger ulp tolerance is added.
+
+Before reading the goldens, the gate runs committed host-only controls against
+the actual reader validators. Valid branch/cancellation cases must pass; an
+out-of-bound FP32 sign crossing, corrupt scan/dW/dX, and Metal or CUDA BF16
+values two ULPs from the independent reference must each exit 1 with the
+expected numerical diagnostic. BF16 rounding goes directly from binary64 to
+BF16 with ties to even. The rounding regression checks every finite adjacent
+BF16 midpoint, both signs and neighboring doubles, plus the cancellation
+example that double-rounds incorrectly through FP32.
+
+Rerun just these controls, or prove that they catch weakened validators:
+
+```bash
+bash tests/metal/check_goldwide_controls.sh
+python3 tests/metal/mutate_goldwide.py
+```
+
+The mutation runner removes the sign-crossing bound, bypasses float64
+validation, and restores the intermediate float cast in isolated build
+copies. Each bad input must escape its mutated validator, the control gate
+must fail, and the unmodified control gate must pass again. Logs and
+`results.json` are written under `build/metal/goldwide/mutations`.
+
+To retain policy intermediates for an independent NumPy diagnosis:
+
+```bash
+# Select the output directory printed by a preceding wide-gate build/run.
+export PUFFER_GOLDWIDE_OUT=/path/to/wide-gate-output
+PUF_POLICY_DUMP_DIR=build/policy-dumps \
+  "$PUFFER_GOLDWIDE_OUT/fp32/test_mingru" $PUFFER_GOLDEN_DIR/wide_a
+python3 tests/metal/diagnose_policy_backward.py $PUFFER_GOLDEN_DIR/wide_a build/policy-dumps
+```
+
+The NumPy script writes `comparison.json` and float64 reference `.npz` files
+beside the raw Metal dumps. CUDA policy cases contain final gradients but
+omit projection and scan-gradient intermediates; those are reconstructed
+from the golden inputs rather than attributed to an unrecorded CUDA dump.

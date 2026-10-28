@@ -115,7 +115,7 @@ unset PUF_PROTEIN_SOBOL_TABLE
 
 The loader requires exactly 2,640,000 bytes and the pinned cuRAND SHA256;
 an invalid path or mismatched table fails clearly. Selection is cached at
-first use for the process. [Export and validation instructions](../tests/metal_ref/README-protein.md)
+first use for the process. [Export and validation instructions](../tests/metal_ref/README.md#external-curand-protein-fixture)
 describe how to supply the table. The public generator, input/output checksums,
 and BSD attribution are in [THIRD_PARTY.md](../THIRD_PARTY.md); the exact gates
 report `SKIP(missing fixture)` when the external table is unavailable.
@@ -195,12 +195,12 @@ best-supported path.
 | Web build | Remains the CPU/Emscripten path, not a Metal backend |
 
 Robot-arm uses the CPU implementation in `ocean/robot_arm/robot_arm_cpu.h`.
-The [recorded Mac mini M4 measurements](dev/investigations/robot-arm-port-report.md)
+The [recorded Mac mini M4 measurements](dev/robot-arm.md#port-and-cpu-physics)
 show environment-only throughput of ~155–158k steps/s on ten threads and bounded
 training of ~110–116k SPS with the default four threads. Full default-config
 1B-step runs on the Mac mini M4 averaged 81–93k SPS (88k mean over three seeds),
 versus 146–161k SPS for CUDA GPU physics on an RTX 3090. In that
-[three-seed comparison](dev/investigations/robot-arm-learning-report.md) neither
+[three-seed comparison](dev/robot-arm.md#full-budget-three-seed-comparison) neither
 backend solves the default task at 1B steps (0% success and lift everywhere);
 final returns match (−4.269 mean on both) and grasp rates (Metal 0.3–9.8%,
 CUDA 7.5–10.1%) show no significant difference, though three seeds per side
@@ -290,7 +290,7 @@ Regenerate CUDA operation/train captures on a CUDA host following
 `NCCL_HOME`; historical BF16/encoder/wide helpers are not all shipped here.
 The NVIDIA cuRAND-exported `protein/curand_sobol32.bin` is never redistributed.
 For private exact-CUDA Protein parity, follow the
-[cuRAND 12.8 exporter instructions](../tests/metal_ref/README-protein.md) on a
+[cuRAND 12.8 exporter instructions](../tests/metal_ref/README.md#external-curand-protein-fixture) on a
 CUDA host, then copy the table into your private fixture directory. Its absence
 leaves `protein` (and optional `protein_mutations`) skipped; `protein_public`
 continues to run. Do not generate numerical expectations from Metal outputs.
@@ -334,4 +334,4 @@ then reduce the listed geometry keys or try BF16 / `--base.async=0`. Set
 **A long NetHack epoch looks stalled:** large H=1024 policies can spend tens of
 seconds in a learner command buffer. The runtime warns after a 60-second host
 wait and prints stream progress; it aborts only after five minutes with no GPU
-completion anywhere. See [the runtime investigation](dev/investigations/metal-runtime-debug.md).
+completion anywhere. See [the runtime investigation](dev/parity-investigations.md#metal-runtime-debugging).

@@ -7,7 +7,8 @@ determination** or a statement that every asset may be redistributed. Code,
 assets and notices are inherited unchanged from upstream PufferLib 5
 (`ea7f989371270d2948f96728bda8aec5e7634a4c`) unless noted below. The Metal
 adaptations and robot-arm asset conversion are fork additions. Dependency pins
-were recorded during cleanup leg 2. This inventory does not change any license.
+are recorded in `tools/build_dependencies.sh`. This inventory does not change
+any license.
 The project-level MIT notice is in [LICENSE](LICENSE); it must not be read as
 replacing more specific notices or filling missing third-party provenance.
 
@@ -80,7 +81,7 @@ mutated-direction negative control.
 
 The former NVIDIA-exported table is removed from the tracked tree. Optional
 exact CUDA mode reads a user-supplied external fixture, with strict size and
-SHA256 checks; see [fixture instructions](tests/metal_ref/README-protein.md).
+SHA256 checks; see [fixture instructions](tests/metal_ref/README.md#external-curand-protein-fixture).
 Default sweeps retain the scrambled Sobol statistical construction but their
 suggestions are no longer bitwise-identical to CUDA. This is a digital shift,
 not a reproduction of cuRAND's scrambled-direction transform.

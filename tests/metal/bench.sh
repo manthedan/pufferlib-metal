@@ -1,5 +1,5 @@
 #!/bin/bash
-# Metal trainer benchmark: the optimization relay's shared yardstick.
+# Metal trainer benchmark: the shared benchmark yardstick.
 # Run from the repo root.
 #
 #   tests/metal/bench.sh                       # build breakout, 3 x 20M-step runs

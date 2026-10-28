@@ -1,11 +1,10 @@
 # Recorded Metal benchmarks
 
-Record dated **2026-10-26**, the date of measurement commit `6cedf3ee` (the
-original log does not record separate per-cohort timestamps). Source:
-[leg 23 development report, section 4](dev/optimization/opt-leg23-report.md#4-end-to-end-ab-cleanab-alternating-cooldown-10-s-base-vs-final).
-Machine: fanless 15-inch MacBook Air M4, 24 GB; macOS 26.4; **AC power**.
-Comparison: base `b0f7bb84` versus `6cedf3ee`. These are historical observations,
-not new measurements on the cleanup host.
+Record dated **2026-10-26** (the source did not retain separate per-cohort
+timestamps). See the [benchmark methodology](dev/optimization-history.md#methodology)
+for the protocol and its load/guard exceptions. Hardware: fanless 15-inch
+MacBook Air M4, 24 GB; macOS 26.4; **AC power**. Comparison: before versus
+after the FMA-corrected sigmoid change. These are historical observations.
 
 | Configuration | Runs | Base median SPS | Final median SPS |
 |---|---:|---:|---:|
@@ -20,11 +19,14 @@ not new measurements on the cleanup host.
 | Freeway BF16 (8.4M steps, concurrent load) | 6 | 0.8880M | 0.9265M |
 | Freeway FP32 (8.4M steps, concurrent load) | 6 | 0.4282M | 0.4036M |
 
-Method: alternating before/after runs, 10-second cooldown, median SPS. Small-policy
-cohorts were run after a competing browser GPU load ended; Freeway was measured
-with that load back at 57–83% GPU time and relaxed bandwidth guards. Full thermal
+Method: alternating before/after runs, 10-second cooldown, median SPS. Breakout and Cartpole BF16 were rerun with a 3% foreign-GPU limit and default
+bandwidth floors. Other small-policy cohorts ran after the main browser load
+ended but retained relaxed guards; one Cartpole FP32 sample still saw 7.5%
+browser GPU time. Freeway ran with browser load at 57–83%, a 95% foreign-GPU
+limit and 40/40 GB/s bandwidth floors. Its FP32 median change was -5.75% while
+the paired median was +2.60%, so the wide control has low confidence. Full thermal
 telemetry and a complete command/config manifest were not retained in the report.
 The historical untracked snake experiment is not a reproducible public benchmark
-and is kept only in the archive. No speed or learning-parity guarantee follows
+and is recorded only in the optimization history. No speed or learning-parity guarantee follows
 from these measurements. Future benchmark updates should record full commands,
 config hashes, toolchain version, thermal state and concurrent load.

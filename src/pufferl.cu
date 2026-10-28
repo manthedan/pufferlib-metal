@@ -905,7 +905,7 @@ static bool metal_gate_env() {
 // PUF_ENV_THREADS=N: run the CPU envs on N threads in total instead of the
 // config's vec.num_threads (split over buffers into OpenMP teams). Envs
 // step independently with per-env RNG, so the count never changes results.
-// Measured (leg 19): clamping Pong/Cartpole's 16 threads on the 10-core M4
+// Measured thread override: clamping Pong/Cartpole's 16 threads on the 10-core M4
 // Air to 4-10 cuts env time but leaves SPS flat, so the default keeps the
 // config's count.
 static int metal_env_threads(int requested) {

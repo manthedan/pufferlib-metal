@@ -1,4 +1,4 @@
-// Every wide Muon stage vs the independent pre-leg20 scalar kernel. Check
+// Every wide Muon stage vs the independent original scalar Muon kernel. Check
 // every intermediate, both ping-pong sides, mixed batches and odd fallbacks.
 #include "gemm.h"
 #include <cmath>
@@ -96,7 +96,7 @@ static void stages(const int shapes[][2],int count){
  cudaStreamDestroy(s);for(auto b:buf)delete b;
 }
 // Exercise the production selector, normalization, scratch layout and store.
-// The reference encodes the pre-leg20 stages directly and never calls the
+// The reference encodes the original scalar stages directly and never calls the
 // wrapper. The driver checks KPROF counts, including these 18 oracle dispatches.
 static void wrapper(int H){
  const int shapes[][2]={{2*H,H},{H,2*H},{H==128?129:256,H==128?128:257},{33,64}};

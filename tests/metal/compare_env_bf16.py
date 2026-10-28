@@ -1,7 +1,7 @@
-"""BF16 env gate: leg-9 policy bounds plus exact/fp64 primitive checks.
+"""BF16 env gate: BF16 policy bounds plus exact/fp64 primitive checks.
 
 Full networks inherit rounded GEMM intermediates: 4 ulp OR 2^-5 tensor max,
-unchanged from leg 9's policy gate. Simple transforms and fixed-point sums
+unchanged from the BF16 policy gate. Simple transforms and fixed-point sums
 are additionally checked exactly; direct arithmetic uses fp64 (1 ulp or
 2^-12 tensor max). Integer backward state and all inputs/params are exact.
 """

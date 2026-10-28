@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Assert actual production-wrapper dispatches using the existing kernel profiler.
 
-Each process also runs one independent pre-leg20 reference (18 dispatches).
+Each process also runs one independent original scalar Muon reference (18 dispatches).
 Fresh processes are required because the Muon environment flag is cached.
 """
 import argparse

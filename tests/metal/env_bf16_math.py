@@ -1,6 +1,6 @@
 """Independent BF16 arithmetic checks on the actual replay intermediates.
 
-One BF16 ulp (or 2^-12 of tensor max for cancellation) is the leg-9 direct
+One BF16 ulp (or 2^-12 of tensor max for cancellation) is the direct
 GEMM budget. Copies, categorical transforms and fixed-point scatters are exact.
 Each backend is checked using its own intermediate inputs; backward uses the
 CUDA saved forward state, as the replay does. No cross-backend network error
@@ -40,7 +40,7 @@ def validate(data, golden, env, groups=None, reference=False):
             "budget": "1 bf16 ulp or 2^-12 tensor max, plus prior GEMM rounding for bias",
         }
         if reference:
-            # cuBLAS can exceed one ulp (leg 9); measure its error, rather
+            # cuBLAS can exceed one ulp in BF16 reductions; measure its error, rather
             # than weakening the Metal-vs-fp64 gate to match cuBLAS.
             rows[name].update(reference_measurement=True, within_budget=ok)
         else:

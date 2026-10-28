@@ -1,5 +1,5 @@
 #!/bin/bash
-# Leg 13 end-to-end gate: Pong (H=64, 1 buffer) and Flappy (H=64, 4 buffers)
+# H64 end-to-end gate: Pong (H=64, 1 buffer) and Flappy (H=64, 4 buffers)
 # seed 1, BF16 and FP32, must reproduce the 0e34f2f9 score and checkpoint
 # sha256 prefix with the fused H=64 learner / rollout step on (default) and
 # with both opted out (generic path).

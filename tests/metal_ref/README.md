@@ -207,6 +207,89 @@ Only 13 lines were added to upstream files; `src/algo.cu` is unchanged.
   above. The packed/aligned parameter warning in host-map section 3.2 is valid;
   tiny full policies deliberately use aligned dimensions.
 
-All work, builds, pip installs, caches, logs, and dumps remain under
-`<cuda-reference>` on CUDA-reference. No sudo/apt was used. Existing baseline binaries
-`puffer` and `puffer_f32` were left untouched and remain untracked.
+## CUDA BF16 custom encoder references
+
+Historical BF16 captures combined the FP32 custom-encoder harness with the
+BF16 reference branch, using a verbatim copy of `tests/metal/env_golden.h`
+as `tests/metal_ref/env_golden.h`.
+
+This is historical capture provenance: `env_golden.sh` was a reference-branch
+helper and is not shipped in this fork. Inside that reference checkout, after
+configuring CUDA/NCCL and installing parser tools:
+
+```bash
+export M4="$(command -v m4)"
+bash tests/metal_ref/env_golden.sh "$PUFFER_GOLDEN_DIR/envs_bf16"
+```
+
+The generator builds default BF16 for OSRS Zulrah/PVP/Colosseum/Inferno,
+Craftax, NMMO3, NetHack, Minimal and Asteroids; it writes both `run_a` and
+`run_b`, `determinism.json`, and SHA256 inventory. The M4 override is needed
+by the relocated bison used to build fast-nle on CUDA-reference. Native training on
+that older checkout also needs `NVCC_EXTRA="-include tests/metal_ref/cuda_launch.h"`
+for NetHack's launch wrappers (the current Metal source defines them itself).
+
+Metal gates (NumPy required; run from the repository root):
+
+```bash
+export PUFFER_GOLDEN_DIR="${PUFFER_GOLDEN_DIR:-$PWD/golden}"
+tests/metal/run_test_env_bf16.sh
+tests/metal/run_test_env_golden.sh --bf16 "$PUFFER_GOLDEN_DIR/envs_bf16"
+PUF_ENV_GOLDEN_RUN=run_b tests/metal/run_test_env_golden.sh --bf16 "$PUFFER_GOLDEN_DIR/envs_bf16"
+# Unchanged FP32 reference gate:
+tests/metal/run_test_env_golden.sh "$PUFFER_GOLDEN_DIR/envs"
+```
+
+The primitive gate poisons destinations and changes inputs across two trials.
+It checks exact transforms/fixed-point scatters and FP64 arithmetic. The
+network gate uses the BF16 policy budget (4 BF16 ulp or 2^-5 tensor max), with
+additional exact and FP64 checks on replay intermediates. Metal's direct
+arithmetic bound remains 1 BF16 ulp or 2^-12 tensor max; NetHack GEMM+bias
+accounts for both upstream stores. CUDA's own FP64 error is measured and
+reported separately: cuBLAS can exceed that stricter bound.
+FP32 outputs from conditional sampling/PPO keep the existing 1e-5 gate;
+actions, BF16 conditional sampling/importance outputs, inputs, parameters
+and backward integer state are exact. Pooling
+choices are independently checked against each backend's unrounded GELU
+scores, including inactive rows and strict first-winner identical records.
+
+## External cuRAND Protein fixture
+
+Public Metal builds embed only Joe--Kuo construction data. Exact CUDA parity
+requires a user-supplied cuRAND 12.8 export, outside the repository. On a
+little-endian CUDA host with `nvcc` and cuRAND installed:
+
+```sh
+export PUFFER_GOLDEN_DIR=/absolute/path/to/private/golden
+bash tests/metal_ref/export_protein_sobol.sh
+```
+
+The wrapper and new host-only exporter option are **untested on CUDA** (developed
+on a Mac). The existing two-output exporter also regenerates the RNG samples
+and requires a GPU. The one-output option only calls cuRAND host table accessors;
+it launches no kernels. Do not use `-DNDEBUG`: export assertions check API/I/O
+errors. Only regenerate in a fixture directory you intend to update.
+
+Copy the result to `$PUFFER_GOLDEN_DIR/protein/curand_sobol32.bin` on the Mac.
+It must contain exactly 20,000 little-endian rows of 33 uint32 words: 32 words
+from `CURAND_SCRAMBLED_DIRECTION_VECTORS_32_JOEKUO6`, followed by the corresponding
+`curandGetScrambleConstants32` word. Size: **2,640,000 bytes**. SHA256:
+
+`fce775e7962beda83fa73c64c628a0323a94eadf5d32bad97d1dc6159e52e5f0`
+
+The tracked `tests/metal/fixture_cases.json` and `fixture_contracts.json` pin this
+external fixture; `check_fixtures.py ... protein` verifies its size and digest.
+Missing data is a skip; malformed data is a failure. Never commit the export.
+
+```sh
+export PUF_PROTEIN_SOBOL_TABLE="$PUFFER_GOLDEN_DIR/protein/curand_sobol32.bin"
+./puffer sweep --sweep.max-runs=2 --sweep.gpus=-1
+```
+
+Selection is cached on first Sobol use per process. An unset variable selects
+public mode; an empty, unreadable, short, oversized or wrong-hash path fails
+clearly. Exact mode retains cuRAND's original float conversion, including its
+possible rounded endpoint of 1.0. `run_test_protein.sh` and `mutate_protein.py`
+select the fixture automatically. `run_all.sh --allow-missing-fixtures` permits
+`SKIP(missing fixture)` for unavailable exact gates while still running the
+offline public-table gate, default sweep and guide smoke.

@@ -1,4 +1,4 @@
-// Exhaustive check of the BF16 fused-MinGRU projection store (leg 21): the
+// Exhaustive check of the BF16 fused-MinGRU projection store: the
 // matmul2d result stored straight into a bfloat threadgroup tile must equal
 // from_float() of the fp32 cooperative-tensor result (the original store) for
 // every fp32 accumulator pattern. Kernels: PUF_TEST_PROJ_STORE section of
