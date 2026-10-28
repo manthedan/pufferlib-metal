@@ -135,7 +135,7 @@ def main():
         "schema_version": 1,
         "requested_steps": 1_000_000_000,
         "actual_steps": STEPS,
-        "curve_definition": "Four equal-width half-open step bins, arithmetic means of logged snapshots; final eval is separate. Missing episode metrics carry forward as in logfix-report.md.",
+        "curve_definition": "Four equal-width half-open step bins, arithmetic means of logged snapshots; final eval is separate. Missing episode metrics carry forward as in parity-investigations.md#training-log-history.",
         "runs": runs,
         "pending": pending,
         "primary_seeds_summary": {

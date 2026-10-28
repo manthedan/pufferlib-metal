@@ -69,5 +69,5 @@ nice -n 19 ./capture cuda_reset.bin 4 reset  # BF16 only
 
 Trim each ordinary capture with
 `python tests/metal/compare_robot_arm.py cuda.bin --trim fixture.bin --steps 4`.
-See `docs/dev/investigations/robot-arm-port-report.md` and `docs/dev/investigations/robot-arm-results.json` for
+See [the robot-arm development record](../../../../docs/dev/robot-arm.md) for
 the long-trajectory errors, performance and training comparison.
