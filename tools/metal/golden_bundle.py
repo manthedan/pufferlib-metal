@@ -328,6 +328,52 @@ def package(args):
             temp.unlink()
 
 
+def download_parts(meta, override_url):
+    """Return [(url, size)] whose concatenation is the archive.
+
+    GitHub release assets are capped at 2 GiB, so a published bundle may list
+    `parts` instead of a single `url`. An explicit --url always means one file.
+    """
+    def url_ok(url):
+        return isinstance(url, str) and url.startswith(('https://', 'http://', 'file://'))
+
+    if override_url is not None:
+        fv.require(url_ok(override_url), 'unsupported --url scheme')
+        return [(override_url, meta['archive_size'])]
+    parts = meta.get('parts')
+    if parts is None:
+        fv.require(url_ok(meta.get('url')), 'no published URL; supply --url or --file')
+        return [(meta['url'], meta['archive_size'])]
+    fv.require(not meta.get('url'), 'metadata sets both url and parts')
+    fv.require(isinstance(parts, list) and parts, 'parts must be a non-empty list')
+    result = []
+    for part in parts:
+        fv.require(isinstance(part, dict) and set(part) == {'url', 'size'} and url_ok(part['url']) and
+                   type(part['size']) is int and part['size'] > 0, f'invalid part entry: {part!r}')
+        result.append((part['url'], part['size']))
+    fv.require(sum(size for _, size in result) == meta['archive_size'], 'part sizes do not sum to archive_size')
+    return result
+
+
+def split(args):
+    archive, size = open_archive_source(args.archive)
+    fv.require(args.part_size > 0, '--part-size must be positive')
+    parts = []
+    with archive:
+        index = 0
+        while True:
+            data = archive.read(args.part_size)
+            if not data:
+                break
+            name = f'{args.archive.name}.part-{index:02d}'
+            with open(args.archive.with_name(name), 'xb') as out:
+                out.write(data)
+            parts.append({'url': args.base_url.rstrip('/') + '/' + name, 'size': len(data)})
+            index += 1
+    fv.require(sum(p['size'] for p in parts) == size, 'split size mismatch')
+    print(json.dumps({'parts': parts}, indent=2))
+
+
 def destination_ok(dest, force):
     fv.require(not dest.is_symlink(), 'destination must not be a symlink')
     fv.require(not dest.exists() or dest.is_dir(), 'destination is not a directory')
@@ -359,18 +405,25 @@ def fetch(args):
         destination_ok(dest, args.force)
         archive = args.file
         if archive is None:
-            url = args.url if args.url is not None else meta.get('url')
-            fv.require(isinstance(url, str) and url.startswith(('https://', 'http://', 'file://')),
-                       'no published URL; supply --url or --file')
+            parts = download_parts(meta, args.url)
             archive = dest.with_name('.' + dest.name + '.' + meta['archive_sha256'] + '.part')
             partial, partial_size = open_partial_download(archive)
             with partial:
-                if partial_size != meta['archive_size']:
-                    command = ['curl', '-fL', '--retry', '5', '--retry-delay', '2']
-                    if partial_size:
-                        command.extend(['-C', str(partial_size)])
-                    command.extend(['-o', '-', '--', url])
-                    subprocess.run(command, stdout=partial, check=True)
+                fv.require(partial_size <= meta['archive_size'], 'partial download is larger than the archive')
+                # Parts concatenate to the archive; resume inside whichever part the partial file ends in.
+                start_offset = 0
+                for url, size in parts:
+                    end = start_offset + size
+                    if partial_size < end:
+                        command = ['curl', '-fL', '--retry', '5', '--retry-delay', '2']
+                        if partial_size > start_offset:
+                            command.extend(['-C', str(partial_size - start_offset)])
+                        command.extend(['-o', '-', '--', url])
+                        subprocess.run(command, stdout=partial, check=True)
+                        partial.flush()
+                        partial_size = os.fstat(partial.fileno()).st_size
+                        fv.require(partial_size == end, f'download size mismatch after part {url}')
+                    start_offset = end
         fv.require(archive.stat().st_size == meta['archive_size'], 'archive size mismatch (partial download?)')
         fv.require(sha(archive) == meta['archive_sha256'], 'archive SHA256 mismatch; extraction refused')
         with tempfile.TemporaryDirectory(dir=dest.parent, prefix='.' + dest.name + '.staging-') as tmp:
@@ -434,6 +487,11 @@ def main():
     p.add_argument('--private-tokens', type=Path, metavar='FILE',
                    help='untracked comma- or newline-separated private tokens to scan for')
     p.set_defaults(action=package)
+    p = commands.add_parser('split', help='cut an archive into release-sized parts and print the metadata')
+    p.add_argument('--archive', type=Path, required=True)
+    p.add_argument('--base-url', required=True, help='release download URL prefix for the parts')
+    p.add_argument('--part-size', type=int, default=1900 * 1024 * 1024)
+    p.set_defaults(action=split)
     p = commands.add_parser('fetch')
     source = p.add_mutually_exclusive_group()
     source.add_argument('--url')

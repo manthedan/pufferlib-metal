@@ -395,6 +395,37 @@ class GoldenBundleTests(unittest.TestCase):
         self.assertFalse(partial.exists())
         self.assertTrue((self.dest / 'run_a/case/x.bin').is_file())
 
+    def test_split_parts_download_and_resume(self):
+        self.package()
+        original = self.archive.read_bytes()
+        part_size = len(original) // 3 + 1
+        result = subprocess.run([sys.executable, str(self.tools / 'golden_bundle.py'), 'split',
+                                 '--archive', str(self.archive), '--base-url', self.base.as_uri(),
+                                 '--part-size', str(part_size)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        parts = json.loads(result.stdout)['parts']
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(b''.join(Path(p['url'][len('file://'):]).read_bytes() for p in parts), original)
+        meta = json.loads(self.metadata.read_text())
+        meta['parts'] = parts
+        (self.spec / 'golden_bundle.json').write_text(json.dumps(meta))
+        partial = self.base / ('.installed.' + meta['archive_sha256'] + '.part')
+        # Resume from inside the second part, then from exactly a part boundary.
+        for cut in (part_size + 5, part_size):
+            partial.write_bytes(original[:cut])
+            self.call('fetch_goldens.sh', '--destination', self.dest, '--force')
+            self.assertFalse(partial.exists())
+            self.assertTrue((self.dest / 'run_a/case/x.bin').is_file())
+        meta['parts'][0]['size'] += 1
+        (self.spec / 'golden_bundle.json').write_text(json.dumps(meta))
+        self.call('fetch_goldens.sh', '--destination', self.dest, '--force',
+                  error='part sizes do not sum to archive_size')
+        meta['parts'][0]['size'] -= 1
+        meta['url'] = self.archive.as_uri()
+        (self.spec / 'golden_bundle.json').write_text(json.dumps(meta))
+        self.call('fetch_goldens.sh', '--destination', self.dest, '--force',
+                  error='metadata sets both url and parts')
+
     def test_symlinked_partial_download_is_rejected(self):
         self.package()
         meta = json.loads(self.metadata.read_text())
