@@ -33,7 +33,7 @@ in FP32**; it does not establish all-environment BF16 or CUDA learning parity.
 See [current coverage](docs/metal-env-coverage.md) and the
 [dated benchmark table](docs/benchmarks.md) for the measured configurations and limits.
 Protein hyperparameter sweeps run on CPU Accelerate; see the guide for usage.
-Golden fixture [fetch/package instructions and current release blocker](tests/metal/README.md#external-golden-bundle) document the external test bundle.
+The CUDA-reference golden fixtures for the Metal tests are a [release download](https://github.com/manthedan/pufferlib-metal/releases/tag/goldens-v1); see the [fetch instructions](tests/metal/README.md#external-golden-bundle).
 
 Credits: PufferAI and upstream contributors; [Valtteri Valo's Metal 4 backend](https://github.com/valtterivalo/PufferLib)
 for PufferLib 4.0 (PR #532); and [MLX](https://github.com/ml-explore/mlx)

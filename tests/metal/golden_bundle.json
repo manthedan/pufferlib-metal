@@ -5,7 +5,16 @@
   "fixture_contracts_sha256": "24cd8bac19800957c53f3243b0345450482f3b0d26bf6a154e59e963cdb23ba8",
   "format": "ustar+gzip",
   "format_version": 1,
-  "status": "ready, unpublished",
-  "uncompressed_size": 5294267886,
-  "url": ""
+  "parts": [
+    {
+      "size": 1992294400,
+      "url": "https://github.com/manthedan/pufferlib-metal/releases/download/goldens-v1/metal-goldens-v1.tar.gz.part-00"
+    },
+    {
+      "size": 1198638128,
+      "url": "https://github.com/manthedan/pufferlib-metal/releases/download/goldens-v1/metal-goldens-v1.tar.gz.part-01"
+    }
+  ],
+  "status": "published (GitHub release goldens-v1)",
+  "uncompressed_size": 5294267886
 }

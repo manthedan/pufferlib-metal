@@ -267,10 +267,10 @@ The public format is `.tar.gz`, readable by stock macOS/Linux tar. Fetch checks
 the pinned archive SHA256, sizes, file list and fixture contracts before
 installing at `$PUFFER_GOLDEN_DIR` (default `<repo>/golden`).
 
-**Current status:** packaging stopped because required, checksum-covered wide
-logs contain personal paths. There is no released archive; the tracked metadata
-has an empty URL and null archive hash/size. The commands below become usable
-after that blocker is resolved and the owner records the release metadata:
+The bundle is published as the
+[`goldens-v1` release](https://github.com/manthedan/pufferlib-metal/releases/tag/goldens-v1)
+(two parts, because GitHub caps release assets at 2 GiB; the fetcher joins and
+verifies them):
 
 ```sh
 tools/metal/fetch_goldens.sh

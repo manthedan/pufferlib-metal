@@ -141,16 +141,19 @@ verify every tensor's content/hash. `--list` needs neither fixtures nor Xcode.
 
 ## External golden bundle
 
-The public bundle is **ready, unpublished**. `golden_bundle.json` pins the
-archive SHA256, size and public fixture contract; its URL is intentionally empty.
-Use `--file` with the locally supplied archive until a download URL is published.
+The bundle is published as the
+[`goldens-v1` release](https://github.com/manthedan/pufferlib-metal/releases/tag/goldens-v1).
+GitHub caps release assets at 2 GiB, so the archive is split into two parts;
+`golden_bundle.json` lists them and pins the combined archive SHA256, size and
+public fixture contract. The fetcher downloads the parts in order into one
+resumable partial file and verifies the combined archive before extracting.
 [The packaging report](../../docs/dev/golden-bundle-report.md) records the actual
 archive, validation results and timings.
 
 ```sh
-# Once a URL is published; defaults to <repo>/golden, just like run_all.sh.
+# Defaults to <repo>/golden, just like run_all.sh.
 tools/metal/fetch_goldens.sh
-# Override the published location (the pinned checksum still applies).
+# Download a single-file copy from elsewhere (the pinned checksum still applies).
 tools/metal/fetch_goldens.sh --url https://example.org/metal-goldens-v1.tar.gz
 # Offline use; use the tracked metadata, or an explicitly trusted local sidecar.
 tools/metal/fetch_goldens.sh --file /path/to/metal-goldens-v1.tar.gz \
@@ -223,8 +226,11 @@ same Python/zlib implementation and input bytes produces identical archives;
 different compressor versions should be checked before changing a release pin.
 A small `.tar.gz.json` sidecar records format version, archive SHA256/size,
 file count, uncompressed size and the contract-file SHA256. After successful
-packaging, review and copy this metadata to `tests/metal/golden_bundle.json`;
-its URL remains empty until the owner publishes. These tools never publish.
+packaging, review and copy this metadata to `tests/metal/golden_bundle.json`.
+To publish, `python3 tools/metal/golden_bundle.py split --archive <archive>
+--base-url <release download URL>` writes `.part-NN` files under 2 GiB and
+prints the `parts` list for the metadata; upload the parts as release assets.
+These tools never publish.
 
 The `.tar.gz.scan.json` audit lists included/excluded files, original matches,
 remaining matches, and rewritten files. UTF-8 metadata, logs and source text
