@@ -360,16 +360,20 @@ def split(args):
     fv.require(args.part_size > 0, '--part-size must be positive')
     parts = []
     with archive:
-        index = 0
-        while True:
-            data = archive.read(args.part_size)
-            if not data:
-                break
-            name = f'{args.archive.name}.part-{index:02d}'
+        remaining = size
+        while remaining:
+            name = f'{args.archive.name}.part-{len(parts):02d}'
+            part_size = min(args.part_size, remaining)
+            # Copy in chunks; a part can be close to 2 GiB.
             with open(args.archive.with_name(name), 'xb') as out:
-                out.write(data)
-            parts.append({'url': args.base_url.rstrip('/') + '/' + name, 'size': len(data)})
-            index += 1
+                left = part_size
+                while left:
+                    data = archive.read(min(left, 1 << 24))
+                    fv.require(data, 'archive shrank while splitting')
+                    out.write(data)
+                    left -= len(data)
+            parts.append({'url': args.base_url.rstrip('/') + '/' + name, 'size': part_size})
+            remaining -= part_size
     fv.require(sum(p['size'] for p in parts) == size, 'split size mismatch')
     print(json.dumps({'parts': parts}, indent=2))
 
