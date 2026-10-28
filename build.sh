@@ -5,7 +5,7 @@ set -e
 #   ./build.sh breakout              # Native train/eval -> ./puffer
 #   ./build.sh breakout mybin        # Native -> ./mybin (does not clobber ./puffer)
 #   ./build.sh breakout --cu         # CUDA env (ENV_HEADER=ocean/ENV/ENV.cu; exclusive vs .h)
-#   ./build.sh robot_arm             # CUDA-only; implies --cu
+#   ./build.sh robot_arm             # CUDA default; --metal uses CPU physics
 #   ./build.sh breakout --float      # float32 precision (required for --slowly)
 #   ./build.sh breakout --cpu        # Play/eval binary (optimized) -> ./ENV
 #   ./build.sh osrs_inferno --cpu     # OSRS visual policy viewer -> ./osrs_inferno
@@ -16,6 +16,7 @@ set -e
 #                                    # packs website 1M-cap policy + *_web.ini
 #                                    # copy build/web/ENV/* to ../docker/puffer.ai/docs/assets/ENV/
 #   ./build.sh breakout --profile    # Kernel profiling binary
+#   ./build.sh breakout --metal      # Apple Metal (macOS; BF16 default, --float for FP32)
 #   ./build.sh constellation         # Sweep dashboard -> ./seethestars
 #   ./build.sh cache_data            # Sweep log cache -> ./cache_data
 #   ./build.sh trailer               # 5.0 trailer -> ./resources/trailer/trailer (also exports diagrams)
@@ -23,7 +24,9 @@ set -e
 # Env is compiled in. Run: ./puffer train|eval|match|sweep [--section.key=value ...]
 
 if [ -z "$1" ]; then
-    echo "Usage: ./build.sh ENV [OUT] [--cu] [--float] [--debug] [--cpu] [--web] [--profile]"
+    echo "Usage: ./build.sh ENV [OUT] [--cu] [--float] [--debug] [--cpu] [--web] [--profile] [--metal]"
+    echo "  --metal: native Apple Metal trainer (macOS; BF16 by default)"
+    echo "  --float: use FP32 instead of the default BF16 trainer precision"
     exit 1
 fi
 ENV=$1
@@ -45,12 +48,13 @@ while [ $# -gt 0 ]; do
         --web)   MODE=web ;;
         --profile) MODE=profile ;;
         --cpu)   MODE=cpu ;;
+        --metal) MODE=metal ;;
         *) echo "Error: unknown argument '$1'" && exit 1 ;;
     esac
     shift
 done
 
-if [ "$ENV" = "robot_arm" ]; then
+if [ "$ENV" = "robot_arm" ] && [ "$MODE" != "metal" ]; then
     USE_GPU_ENV=1
     case "${MODE:-native}" in
         cpu|web)
@@ -61,6 +65,10 @@ if [ "$ENV" = "robot_arm" ]; then
 fi
 
 if [ "$ENV" = "all" ]; then
+    if [ "${MODE:-}" = "metal" ]; then
+        echo "Error: all --metal is unsupported; build named environments with --metal [--float], or use tools/metal/env_sweep.sh for smoke training." >&2
+        exit 2
+    fi
     FAILED=""
     for env_dir in ocean/*/; do
         env=$(basename "$env_dir")
@@ -107,17 +115,7 @@ CLANG_WARN=(
     -Wno-error=array-parameter
 )
 
-download() {
-    local name=$1 url=$2
-    [ -d "$name" ] && return
-    echo "Downloading $name..."
-    case "$url" in
-        *.zip) curl -sL "$url" -o "$name.zip" && unzip -q "$name.zip" && rm "$name.zip" ;;
-        *)     curl -sL "$url" -o "$name.tar.gz" && tar xf "$name.tar.gz" && rm "$name.tar.gz" ;;
-    esac
-}
-
-RAYLIB_URL="https://github.com/raysan5/raylib/releases/download/5.5"
+source tools/build_dependencies.sh
 if [ "$MODE" = "web" ]; then
     RAYLIB_NAME='raylib-5.5_webassembly'
     download "$RAYLIB_NAME" "$RAYLIB_URL/$RAYLIB_NAME.zip"
@@ -171,28 +169,31 @@ elif [ "$ENV" = "impulse_wars" ]; then
     elif [ "$PLATFORM" = "Linux" ]; then BOX2D_NAME='box2d-linux-amd64'
     else BOX2D_NAME='box2d-macos-arm64'
     fi
-    BOX2D_URL="https://github.com/capnspacehook/box2d/releases/latest/download"
     download "$BOX2D_NAME" "$BOX2D_URL/$BOX2D_NAME.tar.gz"
     INCLUDES+=(-I./$BOX2D_NAME/include -I./$BOX2D_NAME/src -I./ocean/impulse_wars -I./vendor/collections-c)
     LINK_ARCHIVES+=("./$BOX2D_NAME/libbox2d.a")
     # C++ trainer only: game is C (void*/compound literals), not C++17.
-    if [ -z "${MODE:-}" ] || [ "$MODE" = "native" ] || [ "$MODE" = "profile" ]; then
+    if [ -z "${MODE:-}" ] || [ "$MODE" = "native" ] || [ "$MODE" = "profile" ] || [ "$MODE" = "metal" ]; then
         EXTRA_SRC="ocean/impulse_wars/impulse_wars_api.c"
     fi
 elif [ "$ENV" = "nethack" ]; then
     SRC_DIR="ocean/$ENV"
     EXTRA_CFLAGS+=(-DPUFFER_NETHACK)
     NLE_DIR="vendor/fast-nle"
-    NLE_REPO="https://github.com/FinlaySanders/fast-nle.git"
-    if [ ! -d "$NLE_DIR/src" ]; then
-        echo "Cloning fast-nle from $NLE_REPO ..."
-        git clone --depth 1 "$NLE_REPO" "$NLE_DIR"
-    fi
+    fetch_fast_nle "$NLE_DIR"
     NETHACK_LIB_DIR="$(pwd)/$NLE_DIR/build"
     if [ ! -f "$NETHACK_LIB_DIR/libnethack.so" ]; then
         echo "Building libnethack.so ..."
-        cmake -S "$NLE_DIR" -B "$NETHACK_LIB_DIR" -DCMAKE_BUILD_TYPE=Release
-        cmake --build "$NETHACK_LIB_DIR" --target nethack -j$(nproc)
+        NLE_CMAKE_FLAGS=()
+        if [ "$PLATFORM" = "Darwin" ]; then
+            # fast-nle calls nle_lnc_bits (int, defined later in nle.c) before
+            # declaring it. GCC warns; Apple clang makes it an error. The
+            # implicit int declaration matches the definition.
+            NLE_CMAKE_FLAGS+=(-DCMAKE_C_FLAGS=-Wno-error=implicit-function-declaration)
+        fi
+        cmake -S "$NLE_DIR" -B "$NETHACK_LIB_DIR" -DCMAKE_BUILD_TYPE=Release \
+            ${NLE_CMAKE_FLAGS[@]+"${NLE_CMAKE_FLAGS[@]}"}
+        cmake --build "$NETHACK_LIB_DIR" --target nethack -j"$(getconf _NPROCESSORS_ONLN)"
     fi
     INCLUDES+=(-I./$NLE_DIR/include
                -I./$NLE_DIR/build/_deps/deboost_context-src/include)
@@ -205,7 +206,7 @@ else
 fi
 
 # src/ocean.cu compiles only this env's custom net (PUFFER_NETHACK, PUFFER_NMMO3, …).
-EXTRA_CFLAGS+=(-DPUFFER_${ENV^^})
+EXTRA_CFLAGS+=(-DPUFFER_$(echo "$ENV" | tr a-z A-Z))
 
 case "$ENV" in
     osrs_*)
@@ -420,28 +421,39 @@ elif [ "$MODE" = "cpu" ]; then
     exit 0
 fi
 
+if [ "$MODE" = "metal" ]; then
+    source tools/metal/build_native.sh
+    exit 0
+fi
+
 CUDA_HOME=${CUDA_HOME:-${CUDA_PATH:-$(dirname "$(dirname "$(which nvcc)")")}}
 # NCCL include/lib fallback.
 # Needed when NCCL is provided by the nvidia-nccl-cu12 wheel in the active venv.
 NCCL_IFLAG=""
 NCCL_LFLAG=""
-for dir in /usr/include /usr/local/cuda/include; do
-    if [ -f "$dir/nccl.h" ]; then NCCL_IFLAG="-I$dir"; break; fi
-done
-for dir in /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64; do
-    if [ -f "$dir/libnccl.so" ] || [ -f "$dir/libnccl.so.2" ]; then NCCL_LFLAG="-L$dir"; break; fi
-done
-if [ -z "$NCCL_IFLAG" ]; then
-    NCCL_IFLAG=$(python -c "import nvidia.nccl, os; print('-I' + os.path.join(nvidia.nccl.__path__[0], 'include'))" 2>/dev/null || echo "")
-fi
-if [ -z "$NCCL_LFLAG" ]; then
-    NCCL_LFLAG=$(python -c "import nvidia.nccl, os; print('-L' + os.path.join(nvidia.nccl.__path__[0], 'lib'))" 2>/dev/null || echo "")
+if [ -n "${NCCL_HOME:-}" ]; then
+    NCCL_IFLAG="-I$NCCL_HOME/include"
+    NCCL_LFLAG="-L$NCCL_HOME/lib"
+else
+    for dir in /usr/include /usr/local/cuda/include; do
+        if [ -f "$dir/nccl.h" ]; then NCCL_IFLAG="-I$dir"; break; fi
+    done
+    for dir in /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64; do
+        if [ -f "$dir/libnccl.so" ] || [ -f "$dir/libnccl.so.2" ]; then NCCL_LFLAG="-L$dir"; break; fi
+    done
+    if [ -z "$NCCL_IFLAG" ]; then
+        NCCL_IFLAG=$(python -c "import nvidia.nccl, os; print('-I' + os.path.join(nvidia.nccl.__path__[0], 'include'))" 2>/dev/null || echo "")
+    fi
+    if [ -z "$NCCL_LFLAG" ]; then
+        NCCL_LFLAG=$(python -c "import nvidia.nccl, os; print('-L' + os.path.join(nvidia.nccl.__path__[0], 'lib'))" 2>/dev/null || echo "")
+    fi
 fi
 
 export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
 export CCACHE_BASEDIR="$(pwd)"
 export CCACHE_COMPILERCHECK=content
-NVCC="ccache $CUDA_HOME/bin/nvcc"
+NVCC="$CUDA_HOME/bin/nvcc"
+if command -v ccache >/dev/null 2>&1; then NVCC="ccache $NVCC"; fi
 CC="${CC:-$(command -v ccache >/dev/null && echo 'ccache clang' || echo 'clang')}"
 ARCH=${NVCC_ARCH:-native}
 

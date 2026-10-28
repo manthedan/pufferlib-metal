@@ -9,38 +9,8 @@
 //   ./test_protein_numerics tests/golden_protein_numerics.txt
 //   ./test_protein_numerics --tol 1e-4 tests/golden_protein_numerics.txt
 
-#include <cuda_runtime.h>
-#include <float.h>
-#include <math.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-// Includers supply BLOCK_SIZE and block_reduce_sum (pufferl does in production).
-#define BLOCK_SIZE 256
-#ifndef PUF_BLOCK_REDUCE_SUM
-#define PUF_BLOCK_REDUCE_SUM
-__device__ __forceinline__ void block_reduce_sum(
-        float *smem, float *out, int tid, int nthreads, int nchan) {
-    __syncthreads();
-    for (int s = nthreads / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            for (int c = 0; c < nchan; c++) {
-                smem[c * nthreads + tid] += smem[c * nthreads + tid + s];
-            }
-        }
-        __syncthreads();
-    }
-    if (tid == 0) {
-        for (int c = 0; c < nchan; c++) {
-            out[c] = smem[c * nthreads];
-        }
-    }
-}
-#endif
-
-#include "protein.cu"
+#include "protein_test.h"
 
 #define MAX_RECORDS 4096
 #define NAME_LEN 128

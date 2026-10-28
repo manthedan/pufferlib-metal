@@ -33,6 +33,7 @@
 // bit-identical run to run. Quantization (6e-8) is below fp32 ulp here.
 #define N3_FXP 16777216.0f
 
+#ifndef PUF_METAL  // Metal: src/metal/kernels_envs.h + shaders/envs_nmmo3.metal
 __constant__ int N3_OFFSETS[10] = {0, 4, 8, 25, 30, 33, 38, 43, 48, 55};
 
 // Conv1 im2col from raw map codes. Channel ic is one-hot of feature f at
@@ -270,6 +271,8 @@ __global__ void n3_fxp_to_precision_kernel(
     }
 }
 
+#endif  // PUF_METAL
+
 struct NMMO3EncoderWeights {
     Prec conv1_w, conv2_w, embed_w, proj_w;
     int obs_size, hidden;
@@ -294,30 +297,30 @@ static Prec nmmo3_encoder_forward(
     }
 
     int c1_rows = B * N3_C1_SPATIAL;
-    n3_c1_im2col_obs<<<grid_size(c1_rows * N3_C1_COL_W), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_c1_im2col_obs, grid_size(c1_rows * N3_C1_COL_W), BLOCK_SIZE, 0, stream)(
         input.data, a->col1.data, B, ew->obs_size);
     Prec c1_col = {.data = a->col1.data, .shape = {c1_rows, N3_C1_COL_W}};
     Prec c1_mm = {.data = a->mm1.data, .shape = {c1_rows, N3_C1_OC}};
     puf_mm(&c1_col, &ew->conv1_w, &c1_mm, stream);
-    n3_rows_to_nchw<<<grid_size(B * N3_C1_OC * N3_C1_SPATIAL), BLOCK_SIZE, 0,
-        stream>>>(a->mm1.data, a->conv1_out.data, B, N3_C1_OC, N3_C1_SPATIAL, 1);
+    PUF_LAUNCH(n3_rows_to_nchw, grid_size(B * N3_C1_OC * N3_C1_SPATIAL), BLOCK_SIZE, 0, stream)(
+        a->mm1.data, a->conv1_out.data, B, N3_C1_OC, N3_C1_SPATIAL, 1);
 
     int c2_rows = B * N3_C2_SPATIAL;
-    n3_c2_im2col<<<grid_size(c2_rows * N3_C2_COL_W), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_c2_im2col, grid_size(c2_rows * N3_C2_COL_W), BLOCK_SIZE, 0, stream)(
         a->conv1_out.data, a->col2.data, B);
     Prec c2_col = {.data = a->col2.data, .shape = {c2_rows, N3_C2_COL_W}};
     Prec c2_mm = {.data = a->mm2.data, .shape = {c2_rows, N3_C2_OC}};
     puf_mm(&c2_col, &ew->conv2_w, &c2_mm, stream);
-    n3_rows_to_nchw<<<grid_size(B * N3_C2_OC * N3_C2_SPATIAL), BLOCK_SIZE, 0,
-        stream>>>(a->mm2.data, a->conv2_out.data, B, N3_C2_OC, N3_C2_SPATIAL, 0);
+    PUF_LAUNCH(n3_rows_to_nchw, grid_size(B * N3_C2_OC * N3_C2_SPATIAL), BLOCK_SIZE, 0, stream)(
+        a->mm2.data, a->conv2_out.data, B, N3_C2_OC, N3_C2_SPATIAL, 0);
 
-    n3_embedding_kernel<<<grid_size(B * N3_PLAYER), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_embedding_kernel, grid_size(B * N3_PLAYER), BLOCK_SIZE, 0, stream)(
         a->embed_out.data, input.data, ew->embed_w.data, B, ew->obs_size);
-    n3_concat_kernel<<<grid_size(B * N3_CONCAT), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_concat_kernel, grid_size(B * N3_CONCAT), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->conv2_out.data, a->embed_out.data, input.data, B,
         ew->obs_size);
     puf_mm(&a->concat, &ew->proj_w, &a->out, stream);
-    n3_relu_kernel<<<grid_size(B * ew->hidden), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_relu_kernel, grid_size(B * ew->hidden), BLOCK_SIZE, 0, stream)(
         a->out.data, B * ew->hidden);
     return a->out;
 }
@@ -328,7 +331,7 @@ static void n3_conv_wgrad(
     precision_t* col_buf, precision_t* mm_buf,
     int B, int OC, int spatial, int col_cols, cudaStream_t stream) {
     int col_rows = B * spatial;
-    n3_nchw_to_rows<<<grid_size(B * OC * spatial), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_nchw_to_rows, grid_size(B * OC * spatial), BLOCK_SIZE, 0, stream)(
         grad_output, mm_buf, B, OC, spatial);
     Prec mm_t = {.data = mm_buf, .shape = {col_rows, OC}};
     Prec col_t = {.data = col_buf, .shape = {col_rows, col_cols}};
@@ -343,13 +346,13 @@ static void nmmo3_encoder_backward(
     int B = grad.shape[0];
     int H = ew->hidden;
 
-    n3_relu_backward_kernel<<<grid_size(B * H), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_relu_backward_kernel, grid_size(B * H), BLOCK_SIZE, 0, stream)(
         grad.data, a->out.data, B * H);
     puf_mm_tn(&grad, &a->concat, &a->proj_wgrad, stream);
     Prec grad_concat = {.data = a->concat.data, .shape = {B, N3_CONCAT}};
     puf_mm_nn(&grad, &ew->proj_w, &grad_concat, stream);
-    n3_concat_backward_conv_kernel<<<grid_size(B * N3_CONV_FLAT), BLOCK_SIZE, 0,
-        stream>>>(a->conv2_grad.data, grad_concat.data, B);
+    PUF_LAUNCH(n3_concat_backward_conv_kernel, grid_size(B * N3_CONV_FLAT), BLOCK_SIZE, 0, stream)(
+        a->conv2_grad.data, grad_concat.data, B);
 
     n3_conv_wgrad(a->conv2_grad.data, a->conv2_wgrad.data,
         a->col2.data, a->mm2.data, B, N3_C2_OC, N3_C2_SPATIAL, N3_C2_COL_W,
@@ -357,11 +360,10 @@ static void nmmo3_encoder_backward(
     Prec mm2 = {.data = a->mm2.data, .shape = {B * N3_C2_SPATIAL, N3_C2_OC}};
     Prec col2 = {.data = a->col2.data, .shape = {B * N3_C2_SPATIAL, N3_C2_COL_W}};
     puf_mm_nn(&mm2, &ew->conv2_w, &col2, stream);
-    n3_c2_col2im<<<grid_size(B * N3_C2_IN_PLANE), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_c2_col2im, grid_size(B * N3_C2_IN_PLANE), BLOCK_SIZE, 0, stream)(
         a->col2.data, a->conv1_grad.data, B);
 
-    n3_relu_backward_kernel<<<grid_size(B * N3_C1_OC * N3_C1_SPATIAL),
-        BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_relu_backward_kernel, grid_size(B * N3_C1_OC * N3_C1_SPATIAL), BLOCK_SIZE, 0, stream)(
         a->conv1_grad.data, a->conv1_out.data, B * N3_C1_OC * N3_C1_SPATIAL);
     n3_conv_wgrad(a->conv1_grad.data, a->conv1_wgrad.data,
         a->col1.data, a->mm1.data, B, N3_C1_OC, N3_C1_SPATIAL, N3_C1_COL_W,
@@ -375,10 +377,10 @@ static void nmmo3_encoder_backward(
     if (blocks > 256) {
         blocks = 256;
     }
-    n3_embedding_backward_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_embedding_backward_kernel, blocks, BLOCK_SIZE, 0, stream)(
         (long long*)a->embed_wgrad_i.data, grad_concat.data, a->saved_obs.data,
         B, ew->obs_size);
-    n3_fxp_to_precision_kernel<<<grid_size(N3_EMBED_N), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(n3_fxp_to_precision_kernel, grid_size(N3_EMBED_N), BLOCK_SIZE, 0, stream)(
         a->embed_wgrad.data, (long long*)a->embed_wgrad_i.data, N3_EMBED_N);
 }
 
@@ -482,6 +484,9 @@ static void create_nmmo3_conv_encoder(Encoder* enc) {
 }
 
 #ifdef N3_ATTN
+#ifdef PUF_METAL
+#error "Metal: N3_ATTN PTX attention encoder is not ported"
+#endif
 // Experimental. NVCC_EXTRA=-DN3_ATTN. Did not beat conv (12.5 vs 14.3).
 // Conv1+conv2 spatial stem plus ego-query attention: token 0 is self,
 // remaining 15 are entities first then items. Readout Y[0] is

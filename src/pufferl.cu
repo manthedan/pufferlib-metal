@@ -29,6 +29,11 @@
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#ifdef PUF_METAL
+#include <algorithm>
+#include <sys/resource.h>
+#include <sys/sysctl.h>
+#endif
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -36,6 +41,12 @@
 
 // Project
 #include "ini.h"
+
+// Kernel launch: PUF_LAUNCH(k, grid, block, smem, stream)(args) is k<<<...>>>(args).
+// The Metal backend (src/metal/launch.h) predefines it to route launches.
+#ifndef PUF_LAUNCH
+#define PUF_LAUNCH(k, g, b, s, st) k<<<g, b, s, st>>>
+#endif
 
 #ifdef PRECISION_FLOAT
 typedef float precision_t;
@@ -152,6 +163,7 @@ void puf_copy(Prec* dst, Prec* src, cudaStream_t stream) {
         cudaMemcpyDeviceToDevice, stream);
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 __global__ void cast(precision_t* dst,
         float* src, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -215,11 +227,12 @@ __global__ void cast_rew_term(
         term_dst[idx] = from_float(term_src[idx]);
     }
 }
+#endif  // PUF_METAL
 
 // Allocates large buffers (params/acts/grads) in contiguous memory.
 struct AllocEntry {
     void** data_ptr;
-    long* shape;
+    int64_t* shape;
     int elem_size;
 };
 
@@ -232,7 +245,7 @@ struct Allocator {
 };
 
 void _alloc_register(Allocator* alloc,
-        void** data_ptr, long* shape, int elem_size) {
+        void** data_ptr, int64_t* shape, int elem_size) {
     alloc->regs = (AllocEntry*)realloc(alloc->regs,
         (alloc->num_regs + 1) * sizeof(AllocEntry));
     alloc->regs[alloc->num_regs++] = {data_ptr, shape, elem_size};
@@ -268,6 +281,7 @@ void alloc_create(Allocator* alloc) {
 
 // Deterministic block tree-reduce. smem layout: smem[c * nthreads + tid].
 // Caller fills smem; tid 0 writes nchan results to out[0..nchan).
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 #ifndef PUF_BLOCK_REDUCE_SUM
 #define PUF_BLOCK_REDUCE_SUM
 __device__ __forceinline__ void block_reduce_sum(
@@ -288,6 +302,7 @@ __device__ __forceinline__ void block_reduce_sum(
     }
 }
 #endif
+#endif  // PUF_METAL
 
 // Algo + sweeps only depend on basic tensor types and utilities
 #include "algo.cu"
@@ -534,6 +549,24 @@ typedef struct PuffeRL {
     bool is_continuous;  // True if all action dimensions are continuous (size==1)
     RolloutBuf rollouts;
     RolloutBuf train_rollouts;  // Pre-allocated transposed copy for train_impl
+#ifdef PUF_METAL
+    // Each slot owns its observation layout until its learner has joined dW.
+    // Set before releasing rollout workers; read only for the other ready slot.
+    bool metal_obs_bt[2];
+    // Rollout-step weights packed at rollout start (metal_rollout_pack);
+    // metal_packed_split > 0 while they match the policy the steps read.
+    float* metal_packed;
+    size_t metal_packed_floats;
+    int metal_packed_split;
+    int metal_rollout_group;  // buffers per dispatch, fixed before workers wake
+    int metal_rollout_gate;   // gated pipelined steps (metal_gated_horizon), like group
+    bool metal_gate_streams;  // rollout streams are host-wait-only for gating
+    // Four-buffer gated groups (rollout_start): 0 undecided, else 2 or 4;
+    // decided once from the learner's rollout slack (metal_dw_policy).
+    int metal_group_pref;
+    int metal_slack_n;
+    float metal_slack[8];
+#endif
     EnvBuf env;
     TrainGraph train_buf;
     Prec train_state;  // (L, A, H) carry in env order; graph reads with dest_off
@@ -566,6 +599,60 @@ typedef struct PuffeRL {
     char env_name[64];  // For policy arch rebuild at create.
 } PuffeRL;
 
+#ifdef PUF_WARM_START_TEST
+static void puf_warm_start_test_dump(const char* path, const void* data, size_t n) {
+    if (!path || !*path) return;
+    void* host = malloc(n);
+    if (!host) exit(2);
+    cudaMemcpy(host, data, n, cudaMemcpyDeviceToHost);
+    FILE* fp = fopen(path, "wb");
+    if (!fp || fwrite(host, 1, n, fp) != n) exit(2);
+    fclose(fp);
+    free(host);
+}
+
+static void puf_warm_start_test_dump_state(PuffeRL* p) {
+    const char* weights = getenv("PUF_WARM_START_TEST_WEIGHTS");
+    const char* momentum = getenv("PUF_WARM_START_TEST_MOMENTUM");
+    puf_warm_start_test_dump(weights, p->policies[0].master_weights.data,
+        numel(p->policies[0].master_weights.shape) * sizeof(float));
+    puf_warm_start_test_dump(momentum, p->muon.mb.data,
+        numel(p->muon.mb.shape) * sizeof(float));
+#if defined(PUFFER_NETHACK) && defined(NH_MSG_FROZEN)
+    auto* ew = (NethackEncoderWeights*)p->policies[0].weights.encoder;
+    size_t bytes = (size_t)NH_MSG_VOCAB * NH_MSG_HID * sizeof(precision_t);
+    puf_warm_start_test_dump(getenv("PUF_WARM_START_TEST_NH_TABLE"), ew->msg_w.data, bytes);
+    puf_warm_start_test_dump(getenv("PUF_WARM_START_TEST_NH_CACHE"), ew->msg_w0_dev, bytes);
+    if (p->hypers.async) {
+        auto* actor = (NethackEncoderWeights*)p->actor_weights.encoder;
+        puf_warm_start_test_dump(getenv("PUF_WARM_START_TEST_NH_ACTOR_CACHE"), actor->msg_w0_dev, bytes);
+    }
+#endif
+}
+
+static void puf_warm_start_test_dump_rollout(PuffeRL* p) {
+    static bool dumped = false;
+    const char* path = getenv("PUF_WARM_START_TEST_OUTPUT");
+    if (dumped || !path || !*path) return;
+    dumped = true;
+    RolloutBuf r = rollout_time_view(&p->rollouts,
+        p->write_slot * p->hypers.horizon, p->hypers.horizon);
+    FILE* fp = fopen(path, "wb");
+    if (!fp) exit(2);
+    auto dump = [&](const void* data, size_t n) {
+        void* host = malloc(n);
+        if (!host) exit(2);
+        cudaMemcpy(host, data, n, cudaMemcpyDeviceToHost);
+        if (fwrite(host, 1, n, fp) != n) exit(2);
+        free(host);
+    };
+    dump(r.actions.data, numel(r.actions.shape) * sizeof(float));
+    dump(r.values.data, numel(r.values.shape) * sizeof(precision_t));
+    dump(r.logprobs.data, numel(r.logprobs.shape) * sizeof(precision_t));
+    fclose(fp);
+}
+#endif
+
 // Infer path: sample + forward, then vec workers.
 static void profile_begin(const char* tag, bool enable) {
     if (enable) {
@@ -579,6 +666,7 @@ static void profile_end(bool enable) {
     }
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 __global__ void rng_init(curandStatePhilox4_32_10_t* states, uint64_t seed, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
@@ -702,7 +790,9 @@ __global__ void sample_logits(
     value_out[idx] = logits[logits_base + fused_cols - 1];
     rng_states[idx] = state;
 }
+#endif  // PUF_METAL
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 // Index into (L, agents, H): element-parallel over L*count*H.
 // state_row is agent index within the state tensor's agent dim.
 static __device__ long state_elem_idx(
@@ -728,6 +818,7 @@ __global__ void snapshot_state(Prec dst, Prec src,
     long dst_i = state_elem_idx(layer, (int)dst.shape[1], dst_start + rel, h, H);
     dst.data[dst_i] = src.data[src_i];
 }
+#endif  // PUF_METAL
 
 // View slot of full (slots, L, A, H) as (L, A, H).
 static Prec init_slot(Prec full, int slot) {
@@ -738,6 +829,7 @@ static Prec init_slot(Prec full, int slot) {
     return {.data = full.data + (long)slot * stride, .shape = {L, A, H}};
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 // Zero RNN state for agents that just terminated. Same grid as snapshot
 // (L*count*H); non-terminal threads return after one terminal load.
 __global__ void zero_term_state(Prec state, Float terminals,
@@ -758,6 +850,7 @@ __global__ void zero_term_state(Prec state, Float terminals,
     long i = state_elem_idx(layer, (int)state.shape[1], state_start + rel, h, H);
     state.data[i] = from_float(0.0f);
 }
+#endif  // PUF_METAL
 
 // Select time t, then agents [start, start+count). Rank-2 has F==0 (zero-term shape);
 // stride uses max(F, 1). Out shape {count, F} keeps ndim 1 when F==0.
@@ -781,6 +874,326 @@ Float puf_slice(Float p, int t, int start, int count) {
     };
 }
 
+#ifndef PUF_METAL
+#define PUF_TRACE(tag, a, b) ((void)0)
+#endif
+#ifdef PUF_METAL
+// Pinned env IO already uses Metal shared storage. The worker finishes all
+// CPU writes before encoding forward, then synchronizes its rollout stream
+// before reading actions or overwriting inputs. Each buffer owns its slice.
+#define PUF_TRACE(tag, a, b) puf_mtl::trace_mark(tag, a, b)
+static bool metal_shared_env() {
+    static const bool enabled = [] {
+        const char* e = getenv("PUF_METAL_SHARED_ENV");
+        return !e || strcmp(e, "0") != 0;
+    }();
+    return enabled;
+}
+#endif
+
+#ifdef PUF_METAL
+// PUF_METAL_ROLLOUT_GATE=0 turns pipelined gated rollout steps off
+// (metal_gated_horizon).
+static bool metal_gate_env() {
+    static const bool enabled = [] {
+        const char* e = getenv("PUF_METAL_ROLLOUT_GATE");
+        return !e || strcmp(e, "0") != 0;
+    }();
+    return enabled;
+}
+
+// PUF_ENV_THREADS=N: run the CPU envs on N threads in total instead of the
+// config's vec.num_threads (split over buffers into OpenMP teams). Envs
+// step independently with per-env RNG, so the count never changes results.
+// Measured (leg 19): clamping Pong/Cartpole's 16 threads on the 10-core M4
+// Air to 4-10 cuts env time but leaves SPS flat, so the default keeps the
+// config's count.
+static int metal_env_threads(int requested) {
+    static const int forced = [] {
+        const char* e = getenv("PUF_ENV_THREADS");
+        return e ? atoi(e) : 0;
+    }();
+    return forced > 0 ? forced : requested;
+}
+
+// OpenMP team of a grouped rollout worker: the buffers' threads combined,
+// capped at all cores but two (the main thread, the other workers) unless
+// PUF_ENV_THREADS sets the count: Cartpole's 16 threads in four-buffer
+// groups would otherwise run one 16-thread team on the 10-core Air
+// (four-buffer gated groups: -2.4% at 16, +0.5% at 8 or 4 vs pairs).
+// Thread counts never change results (per-env RNG).
+static int metal_env_team(int workers, int group) {
+    static const int cap = [] {
+        if (getenv("PUF_ENV_THREADS")) return 1 << 20;
+        int n = 0;
+        size_t len = sizeof(n);
+        if (sysctlbyname("hw.ncpu", &n, &len, NULL, 0) != 0) n = 0;
+        return n > 4 ? n - 2 : 1 << 20;
+    }();
+    int team = workers * group;
+    return group > 1 && team > cap ? cap : team;
+}
+
+// PUF_METAL_ROLLOUT_SPIN_US: host waits on rollout streams poll for up to
+// this long before blocking (puf_mtl::stream_wait_spin). 0 = block at once.
+static uint32_t metal_rollout_spin_us() {
+    static const uint32_t v = [] {
+        const char* e = getenv("PUF_METAL_ROLLOUT_SPIN_US");
+        return e ? (uint32_t)atoi(e) : 0u;
+    }();
+    return v;
+}
+
+// PUF_METAL_ROLLOUT_PACKED: -1 unset (packed steps, default split), 0 off,
+// else the forced split (metal_rollout_pack).
+static int metal_rollout_packed_env() {
+    static const int v = [] {
+        const char* e = getenv("PUF_METAL_ROLLOUT_PACKED");
+        return !e ? -1 : atoi(e);
+    }();
+    return v;
+}
+
+// The whole step (obs/reward/terminal/mask casts, H=32 fused forward with
+// terminal reset and snapshot, discrete sampling) as one dispatch
+// (shaders/rollout.metal rollout_step_h32). Only for one trainable-or-frozen
+// policy spanning the buffer block, float or u8 observations and discrete
+// actions;
+// returns false (nothing enqueued) otherwise. PUF_METAL_ROLLOUT_STEP=0
+// disables it. Same per-element arithmetic, so results are bit-identical.
+// Observation element type: 0 precision_t (copied bitwise: float in FP32,
+// bf16 in BF16), 1 u8, 2 float in a BF16 build (cast as the generic cast
+// kernel does), -1 unsupported.
+template <typename O>
+static int metal_rollout_step_obs(O*) { return -1; }
+static int metal_rollout_step_obs(precision_t*) { return 0; }
+static int metal_rollout_step_obs(unsigned char*) { return 1; }
+#ifndef PRECISION_FLOAT
+static int metal_rollout_step_obs(float*) { return 2; }
+#endif
+
+static bool metal_rollout_step(PuffeRL* pufferl, int buf, int t, RolloutBuf& rollouts,
+        EnvBuf* env, int start, int block_size, int graph_slot, cudaStream_t stream,
+        bool obs_bt = false, bool args_only = false, puf_mtl::RolloutStepArgs* out = nullptr) {
+    static const bool enabled = [] {
+        const char* e = getenv("PUF_METAL_ROLLOUT_STEP");
+        return !e || strcmp(e, "0") != 0;
+    }();
+    static const bool fused_reset = [] {
+        const char* e = getenv("PUF_METAL_FUSED_RESET");
+        return !e || strcmp(e, "0") != 0;
+    }();
+    int* layout = pufferl->vec->policy_layout;
+    if (!enabled || !fused_reset || pufferl->num_policies != 1
+            || layout[0] != 0 || layout[1] != block_size
+            || metal_rollout_step_obs(env->obs.data) < 0) {
+        return false;
+    }
+    Policy* pol = &pufferl->policies[0];
+    Hypers* hypers = &pufferl->hypers;
+    Weights* w = (!pol->frozen && hypers->async) ? &pufferl->actor_weights : &pol->weights;
+    DecoderWeights* dw = (DecoderWeights*)w->decoder;
+    if (dw->continuous) return false;
+    Activations* acts = &pol->buf_acts[buf];
+    Prec* st = &pol->buffer_states[buf];
+    Prec obs_b = puf_slice(rollouts.observations, t, start, block_size);
+    if (obs_b.shape[1] != env->obs.shape[1]) return false;
+    if (obs_bt) {
+        // The slot allocation is unchanged, but its rows are (agent,time,obs).
+        obs_b.data = rollouts.observations.data
+            + ((long)start * hypers->horizon + t) * obs_b.shape[1];
+        if ((long)hypers->horizon * obs_b.shape[1] > 0x7fffffffL) return false;
+    }
+    Prec initial = {};
+    if (!pol->frozen && t == 0 && rollouts.initial_states.data != NULL) {
+        initial = init_slot(rollouts.initial_states, graph_slot);
+    }
+    puf_mtl::RolloutStepArgs a = {};
+    Prec dec = arch_try_fused_rollout(&pol->arch, *w, *acts, obs_b, *st, stream,
+        env->terminals.data + start,
+        initial.data ? initial.data + (long)start * st->shape[2] : nullptr,
+        initial.data ? (int)initial.shape[1] : 0, &a.fwd);
+    if (!dec.data) return false;
+    // H=64 (rollout_step_h64, 8 agents per simdgroup) trades ~12 dispatch
+    // boundaries per step for more GPU time under learner contention: a win
+    // when the per-buffer rollout threads are latency-bound (Flappy, 4
+    // buffers: +6%) and for a single FP32 buffer, whose learner dominates
+    // (Pong FP32: +2%), a loss for a single BF16 buffer (Pong BF16: -8%).
+    // The packed step (rollout_step_packed) halves that GPU time, so with it
+    // the single BF16 buffer takes the step too (Pong BF16 rollout wait
+    // 41 -> 23 ms/epoch, SPS neutral: its learner is the critical path).
+    // PUF_METAL_ROLLOUT_STEP_H64=1 / 0 forces it on / off.
+    static const int step_h64 = [] {
+        const char* e = getenv("PUF_METAL_ROLLOUT_STEP_H64");
+        return !e ? -1 : strcmp(e, "0") != 0;
+    }();
+    bool step_h64_default = hypers->num_buffers > 1 || !USE_BF16
+        || metal_rollout_packed_env() != 0;
+    if (a.fwd.hidden == 64 && !(step_h64 == 1 || (step_h64 < 0 && step_h64_default))) {
+        return false;
+    }
+
+    int mask_size = rollouts.action_mask.shape[2];
+    Float act_b = puf_slice(rollouts.actions, t, start, block_size);
+    Prec lp_b = puf_slice(rollouts.logprobs, t, start, block_size);
+    Prec val_b = puf_slice(rollouts.values, t, start, block_size);
+    Prec mask_b = puf_slice(rollouts.action_mask, t, start, block_size);
+    Prec rew_dst = puf_slice(rollouts.rewards, t, start, block_size);
+    Prec term_dst = puf_slice(rollouts.terminals, t, start, block_size);
+    long act_cols = env->actions.shape[1];
+    a.smp = {puf_mtl::gpu_addr(dec.data), 0, puf_mtl::gpu_addr(pufferl->act_sizes),
+        puf_mtl::gpu_addr(act_b.data), puf_mtl::gpu_addr(env->actions.data + (long)start * act_cols),
+        puf_mtl::gpu_addr(lp_b.data), puf_mtl::gpu_addr(val_b.data),
+        puf_mtl::gpu_addr(pufferl->rng_states[buf]), puf_mtl::gpu_addr(mask_b.data),
+        (int32_t)dec.shape[0], (int32_t)dec.shape[1], NUM_ATNS, mask_size, 0};
+    a.obs_src = puf_mtl::gpu_addr(env->obs.data + (long)start * env->obs.shape[1]);
+    a.obs_is_u8 = metal_rollout_step_obs(env->obs.data);
+    a.rew_dst = puf_mtl::gpu_addr(rew_dst.data);
+    a.rew_src = puf_mtl::gpu_addr(env->rewards.data + start);
+    a.term_dst = puf_mtl::gpu_addr(term_dst.data);
+    a.term_src = puf_mtl::gpu_addr(env->terminals.data + start);
+    a.mask_dst = puf_mtl::gpu_addr(mask_b.data);
+    a.mask_src = puf_mtl::gpu_addr(env->action_mask.data + (long)start * mask_size);
+    a.mask_size = mask_size;
+    a.obs_row_stride = obs_bt ? hypers->horizon * (int)obs_b.shape[1] : 0;
+    if (!puf_mtl::rollout_step_supported(a)) return false;
+    if (out) *out = a;
+    if (args_only) return true;
+    if (pufferl->metal_packed_split) {
+        puf_mtl::rollout_use_packed(a.fwd, puf_mtl::gpu_addr(pufferl->metal_packed));
+        puf_mtl::rollout_step_packed(stream, a, pufferl->metal_packed_split);
+    } else {
+        puf_mtl::rollout_step(stream, a);
+    }
+    return true;
+}
+
+// Allocation-free eligibility shared by preflight and the actual pack path.
+// The step still validates its bound GPU addresses immediately before dispatch.
+static int metal_rollout_pack_split(PuffeRL* p) {
+    const char* flags[] = {"PUF_METAL_ROLLOUT_STEP", "PUF_METAL_FUSED_RESET",
+        "PUF_METAL_FUSED_ROLLOUT"};
+    for (const char* key : flags) {
+        const char* v = getenv(key);
+        if (v && strcmp(v, "0") == 0) return 0;
+    }
+    int split = metal_rollout_packed_env();
+    int B = p->hypers.total_agents / p->hypers.num_buffers;
+    int H = p->hypers.hidden_size;
+    if (!split || p->num_policies != 1 || p->is_continuous
+            || p->vec->policy_layout[0] != 0 || p->vec->policy_layout[1] != B
+            || metal_rollout_step_obs(p->env.obs.data) < 0) return 0;
+    Arch* arch = &p->policies[0].arch;
+    if (arch->encoder.forward != encoder_forward || arch->network.forward != mingru_forward
+            || arch->decoder.forward != decoder_forward) return 0;
+    int K = arch->encoder.in_dim, D = arch->decoder.output_dim + 1;
+    if ((H != 32 && H != 64) || arch->encoder.out_dim != H
+            || arch->decoder.hidden_dim != H
+            || !puf_mtl::fused_rollout_supported(B, K, H, arch->network.num_layers, D)
+            || p->env.obs.shape[1] != K || p->env.action_mask.shape[1] > 256
+            || (long)p->hypers.horizon * K > 0x7fffffffL) return 0;
+    const char* h64 = getenv("PUF_METAL_ROLLOUT_STEP_H64");
+    if (H == 64 && h64 && strcmp(h64, "0") == 0) return 0;
+    if (split < 0) split = (H == 32 ? 1 : 2) * (USE_BF16 ? 1 : 2);
+    if ((H == 32 && split > 2) || (split != 1 && split != 2 && split != 4)) return 0;
+    return split;
+}
+
+// Test hook (tests/metal/run_test_pack_order.sh): PUF_METAL_TEST_PACK_HOLD=1
+// holds the default stream ~3 ms before each pack, so a rollout whose
+// workers did not wait for the pack would read stale packed weights.
+static void* metal_pack_release(void* h) {
+    usleep(3000);
+    puf_mtl::test_release(h);
+    return NULL;
+}
+
+// Packs the weights the rollout steps of this rollout will read (rollout.h
+// rollout_pack: float MMA tiles, exact) on the default stream; rollout_start
+// syncs that stream (with the async actor snapshot) before any worker steps.
+// Called by rollout_start after the snapshot copy, i.e. whenever those
+// weights may have changed. PUF_METAL_ROLLOUT_PACKED=0 keeps rollout_step;
+// 1/2/4 forces the split (simdgroups per 8-agent group, rollout_step_packed).
+static void metal_rollout_pack(PuffeRL* p, int slot, RolloutBuf& view) {
+    const int split = metal_rollout_pack_split(p);
+    p->metal_packed_split = 0;
+    puf_mtl::RolloutStepArgs a = {};
+    int block = p->hypers.total_agents / p->hypers.num_buffers;
+    if (split == 0 || !metal_rollout_step(p, 0, 0, view, &p->env, 0, block, slot,
+            p->streams[0], p->metal_obs_bt[slot], true, &a)) {
+        return;
+    }
+    const puf_mtl::FusedRolloutArgs& f = a.fwd;
+    size_t n = puf_mtl::rollout_packed_floats(f.input_dim, f.hidden, f.layers, f.output_dim);
+    if (n > p->metal_packed_floats) {
+        cudaFree(p->metal_packed);
+        cudaMalloc((void**)&p->metal_packed, n * sizeof(float));
+        p->metal_packed_floats = n;
+    }
+    puf_mtl::RolloutPackArgs pa = {f.encoder, {}, f.decoder, puf_mtl::gpu_addr(p->metal_packed),
+        f.input_dim, f.hidden, f.layers, f.output_dim};
+    for (int l = 0; l < 4; l++) pa.recurrent[l] = f.recurrent[l];
+    static const bool hold = getenv("PUF_METAL_TEST_PACK_HOLD")
+        && strcmp(getenv("PUF_METAL_TEST_PACK_HOLD"), "0") != 0;
+    if (hold) {
+        pthread_t th;
+        pthread_create(&th, NULL, metal_pack_release, puf_mtl::test_hold(p->default_stream));
+        pthread_detach(th);
+    }
+    puf_mtl::rollout_pack(p->default_stream, pa);
+    p->metal_packed_split = split;
+}
+
+// Decoder dW placement for the next epoch (algo.cu g_metal_dw_side). On the
+// side stream, each minibatch's learner work splits into two command buffers
+// around a cross-queue hand-off that leaves the learner idle ~180 us; that
+// loses whenever the learner is on the critical path (clean A/B, side ->
+// train stream: Cartpole +7.6% BF16 / +6.4% FP32, Pong +8.3% / +2.7%,
+// Flappy BF16 +1.5%). A single rollout buffer whose step chain is the
+// critical path instead runs uncontended in those gaps (Breakout: -2.2% /
+// -1.7% on the train stream). So: the side stream only with one buffer
+// and a learner that waited for the rollout more than 5% of the last epoch
+// (Breakout ~10-15%, Pong ~1%). PUF_METAL_DW_SIDE=0 / 1 pins it.
+// The backward dW overlap (algo.cu g_metal_bwd_overlap) uses the same
+// signal: its concurrent dW GEMMs shorten the learner but contend with an
+// overlapping rollout, so it only runs while the learner is the critical
+// path (slack <= 5%; sync training always). Clean A/B with it always on:
+// Pong +2.8% BF16, but Flappy FP32 -4.9% and Breakout BF16 -2.8% (both
+// rollout bound, 15-30% slack). PUF_METAL_BWD_OVERLAP=0 / 1 pins it.
+static void metal_dw_policy(PuffeRL* p, double slack, double epoch) {
+    static const int pinned = [] {
+        const char* e = getenv("PUF_METAL_DW_SIDE");
+        return !e ? -1 : strcmp(e, "0") != 0;
+    }();
+    g_metal_dw_side = pinned >= 0 ? pinned == 1
+        : p->hypers.num_buffers == 1 && slack > 0.05 * epoch;
+    g_metal_bwd_overlap = slack <= 0.05 * epoch;
+    // Four-buffer gated groups: one rollout queue whose bigger steps start
+    // ~25 us after gate_open instead of 70-100 us on two queues of pairs,
+    // but contend harder with the learner. Clean n=6 vs pairs: Flappy
+    // +6.5% BF16 / +4.5% FP32 (learner waits 14% / 9% of an epoch for the
+    // rollout with pairs), Cartpole +1.3% / -1.2% (0.4% / 2%). So: decided
+    // once, from the median slack of async epochs 3-8 under pairs (> 5%,
+    // as for the dW policies: four-buffer groups).
+    if (p->metal_group_pref == 0 && p->hypers.async && epoch > 0) {
+        if (p->epoch > 2) p->metal_slack[p->metal_slack_n++] = (float)(slack / epoch);
+        if (p->metal_slack_n == 6) {
+            float s[6];
+            memcpy(s, p->metal_slack, sizeof(s));
+            std::sort(s, s + 6);
+            float med = 0.5f * (s[2] + s[3]);
+            p->metal_group_pref = med > 0.05f ? 4 : 2;
+            if (p->hypers.num_buffers % 4 == 0 && p->metal_rollout_gate) {
+                fprintf(stderr, "metal: learner slack %.1f%% -> rollout groups of %d\n",
+                    100.0f * med, p->metal_group_pref);
+            }
+        }
+    }
+}
+#else
+static int metal_env_team(int workers, int group) { return workers * group; }
+#endif
+
 static void pufferl_forward_step(PuffeRL* pufferl, int buf, int t,
         cudaStream_t stream) {
     Hypers* hypers = &pufferl->hypers;
@@ -792,10 +1205,30 @@ static void pufferl_forward_step(PuffeRL* pufferl, int buf, int t,
     }
     EnvBuf* env = &pufferl->env;
     VecEnv* vec = pufferl->vec;
+#ifdef PUF_METAL
+    EnvBuf shared_env = *env;
+    if (metal_shared_env()) {
+        shared_env.obs.data = vec->observations;
+        shared_env.actions.data = vec->actions;
+        shared_env.rewards.data = vec->rewards;
+        shared_env.terminals.data = vec->terminals;
+        shared_env.action_mask.data = vec->action_mask;
+        env = &shared_env;
+    }
+#endif
     int block_size = hypers->total_agents / hypers->num_buffers;
     int start = buf * block_size;
     int* layout = vec->policy_layout;
 
+#ifdef PUF_METAL
+    if (metal_rollout_step(pufferl, buf, t, rollouts, env, block_size * buf, block_size,
+            graph_slot, stream, pufferl->metal_obs_bt[graph_slot])) {
+        return;
+    }
+    if (pufferl->metal_obs_bt[graph_slot]) {
+        puf_mtl::fatal("rollout observation layout: eligibility changed within a horizon");
+    }
+#endif
     // Copy observations, rewards, terminals from GPU env buffers to rollout buffer
     ObsTensor* obs_env = &env->obs;
     int n = block_size * obs_env->shape[1];
@@ -806,13 +1239,13 @@ static void pufferl_forward_step(PuffeRL* pufferl, int buf, int t,
             obs_env->data + (long)start * obs_env->shape[1],
             n * sizeof(precision_t), cudaMemcpyDeviceToDevice, stream);
     } else {
-        cast<<<grid_size(n), BLOCK_SIZE, 0, stream>>>(
+        PUF_LAUNCH(cast, grid_size(n), BLOCK_SIZE, 0, stream)(
             obs_dst.data, obs_env->data + (long)start * obs_env->shape[1], n);
     }
 
     Prec rew_dst = puf_slice(rollouts.rewards, t, start, block_size);
     Prec term_dst = puf_slice(rollouts.terminals, t, start, block_size);
-    cast_rew_term<<<grid_size(block_size), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(cast_rew_term, grid_size(block_size), BLOCK_SIZE, 0, stream)(
         rew_dst.data, env->rewards.data + start,
         term_dst.data, env->terminals.data + start, block_size);
 
@@ -820,7 +1253,7 @@ static void pufferl_forward_step(PuffeRL* pufferl, int buf, int t,
     int mask_size = rollouts.action_mask.shape[2];
     int mask_stride = mask_size;
     Prec mask_slice = puf_slice(rollouts.action_mask, t, start, block_size);
-    cast<<<grid_size(block_size * mask_size), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(cast, grid_size(block_size * mask_size), BLOCK_SIZE, 0, stream)(
         mask_slice.data,
         env->action_mask.data + (long)start * mask_size,
         block_size * mask_size);
@@ -847,19 +1280,41 @@ static void pufferl_forward_step(PuffeRL* pufferl, int buf, int t,
         Prec val_b  = puf_slice(rollouts.values,       t, sub, n);
         Prec mask_b = puf_slice(rollouts.action_mask,  t, sub, n);
 
-        // Per-policy state is compact (n agents); local index 0..n-1.
-        int state_n = (int)st->shape[0] * n * (int)st->shape[2];
-        zero_term_state<<<grid_size(state_n), BLOCK_SIZE, 0, stream>>>(
-            *st, env->terminals, 0, sub, n);
-
-        // Carry path: snapshot trainable policy state into per-slot initial_states.
-        if (!pol->frozen && t == 0 && rollouts.initial_states.data != NULL) {
-            Prec slot_st = init_slot(rollouts.initial_states, graph_slot);
-            snapshot_state<<<grid_size(state_n), BLOCK_SIZE, 0, stream>>>(
-                slot_st, *st, sub, n);
+        Prec dec = {};
+#ifdef PUF_METAL
+        static const bool fused_reset = [] {
+            const char* e = getenv("PUF_METAL_FUSED_RESET");
+            return !e || strcmp(e, "0") != 0;
+        }();
+        if (fused_reset) {
+            // Snapshot the post-reset state before the fused forward updates it.
+            // The destination keeps the full rollout's layer stride even when
+            // this policy owns only a compact subset of the agents.
+            Prec initial = {};
+            if (!pol->frozen && t == 0 && rollouts.initial_states.data != NULL) {
+                initial = init_slot(rollouts.initial_states, graph_slot);
+            }
+            dec = arch_try_fused_rollout(&pol->arch, *w, *acts, obs_b, *st, stream,
+                env->terminals.data + sub,
+                initial.data ? initial.data + (long)sub * st->shape[2] : nullptr,
+                initial.data ? (int)initial.shape[1] : 0);
         }
+#endif
+        if (!dec.data) {
+            // Per-policy state is compact (n agents); local index 0..n-1.
+            int state_n = (int)st->shape[0] * n * (int)st->shape[2];
+            PUF_LAUNCH(zero_term_state, grid_size(state_n), BLOCK_SIZE, 0, stream)(
+                *st, env->terminals, 0, sub, n);
 
-        Prec dec = arch_forward(&pol->arch, *w, *acts, obs_b, *st, stream);
+            // Carry path: snapshot trainable policy state into per-slot initial_states.
+            if (!pol->frozen && t == 0 && rollouts.initial_states.data != NULL) {
+                Prec slot_st = init_slot(rollouts.initial_states, graph_slot);
+                PUF_LAUNCH(snapshot_state, grid_size(state_n), BLOCK_SIZE, 0, stream)(
+                    slot_st, *st, sub, n);
+            }
+
+            dec = arch_forward(&pol->arch, *w, *acts, obs_b, *st, stream);
+        }
 
         Prec p_logstd = {};
         DecoderWeights* dw = (DecoderWeights*)w->decoder;
@@ -868,7 +1323,7 @@ static void pufferl_forward_step(PuffeRL* pufferl, int buf, int t,
         }
 
         // Offset RNG by off so policies don't collide on per-buffer rng slots.
-        sample_logits<<<grid_size(n), BLOCK_SIZE, 0, stream>>>(
+        PUF_LAUNCH(sample_logits, grid_size(n), BLOCK_SIZE, 0, stream)(
             dec, p_logstd, pufferl->act_sizes,
             act_b.data, env->actions.data + (long)sub * act_cols,
             lp_b.data, val_b.data,
@@ -937,6 +1392,7 @@ __host__ __device__ static inline void log_accum(float* acc, Log* log, int clear
     }
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 __global__ void log_reduce(Env* envs,
         float* out, int total_agents, int clear) {
     extern __shared__ float sh[];
@@ -950,10 +1406,11 @@ __global__ void log_reduce(Env* envs,
     }
     block_reduce_sum(sh, out, tid, blockDim.x, LOG_NF);
 }
+#endif  // PUF_METAL
 
 static void env_log_sum(VecEnv* vec, Log* out, int clear) {
     if (PUF_BACKEND == PUF_GPU) {
-        log_reduce<<<1, 256, LOG_NF * 256 * sizeof(float)>>>(
+        PUF_LAUNCH(log_reduce, 1, 256, LOG_NF * 256 * sizeof(float), 0)(
             vec->envs, vec->log_scratch, vec->total_agents, clear);
         cudaMemcpy(out, vec->log_scratch, sizeof(Log), cudaMemcpyDeviceToHost);
         return;
@@ -986,7 +1443,11 @@ static void env_setup(PuffeRL* p, VecEnv* vec, Dict* vk, Dict* ek) {
     int total_agents = vec->total_agents;
     int num_buffers = vec->buffers;
     int apb = vec->agents_per_buf;
-    vec->num_workers = dict_get(vk, "num_threads") / num_buffers;
+    int num_threads = dict_get(vk, "num_threads");
+#ifdef PUF_METAL
+    num_threads = metal_env_threads(num_threads);
+#endif
+    vec->num_workers = num_threads / num_buffers;
     if (vec->num_workers < 1) {
         vec->num_workers = 1;
     }
@@ -1091,6 +1552,9 @@ static void env_setup(PuffeRL* p, VecEnv* vec, Dict* vk, Dict* ek) {
 }
 
 static void cpu_upload(PuffeRL* p, int start, int n, cudaStream_t stream) {
+#ifdef PUF_METAL
+    if (metal_shared_env()) return;
+#endif
     VecEnv* v = p->vec;
     EnvBuf* e = &p->env;
     long mask = v->mask_size;
@@ -1105,6 +1569,158 @@ static void cpu_upload(PuffeRL* p, int start, int n, cudaStream_t stream) {
         v->action_mask + (size_t)start * mask,
         n * mask * sizeof(unsigned char), cudaMemcpyHostToDevice, stream);
 }
+
+#ifdef PUF_METAL
+static void metal_rollout_group_step(PuffeRL* p, int buf, int t, int count, cudaStream_t stream) {
+    int slot = p->hypers.async ? p->write_slot : 0;
+    RolloutBuf view = rollout_time_view(&p->rollouts, slot * p->hypers.horizon, p->hypers.horizon);
+    EnvBuf env = p->env;
+    if (metal_shared_env()) {
+        env.obs.data = p->vec->observations;
+        env.actions.data = p->vec->actions;
+        env.rewards.data = p->vec->rewards;
+        env.terminals.data = p->vec->terminals;
+        env.action_mask.data = p->vec->action_mask;
+    }
+    puf_mtl::RolloutStepArgs args[4];
+    int block = p->vec->agents_per_buf;
+    if (count == 1) {  // the packed single-buffer step, as pufferl_forward_step encodes it
+        if (!metal_rollout_step(p, buf, t, view, &env, buf * block, block, slot, stream,
+                p->metal_obs_bt[slot])) {
+            puf_mtl::fatal("rollout step eligibility changed within a horizon");
+        }
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        if (!metal_rollout_step(p, buf + i, t, view, &env, (buf + i) * block, block,
+                slot, stream, p->metal_obs_bt[slot], true, &args[i])) {
+            puf_mtl::fatal("rollout group eligibility changed within a horizon");
+        }
+        puf_mtl::rollout_use_packed(args[i].fwd, puf_mtl::gpu_addr(p->metal_packed));
+    }
+    puf_mtl::rollout_steps_packed(stream, args, count, p->metal_packed_split);
+}
+#endif
+
+#ifdef PUF_METAL
+static void metal_read_step_times(cudaEvent_t* e, float* acc) {
+    float ms;
+    cudaEventElapsedTime(&ms, e[MODEL_START], e[MODEL_END]);
+    acc[PROF_MODEL] += ms;
+    cudaEventElapsedTime(&ms, e[MODEL_END], e[COPY_END]);
+    acc[PROF_COPY] += ms;
+}
+
+// Test hook (run_test_rollout_gate.sh): PUF_METAL_TEST_GATE_HOLD=N sleeps
+// 4.5 s in the env step of the N-th gated step of the process (counted over
+// workers), so Metal releases the gated commit behind it before gate_open.
+static bool metal_gate_hold_now() {
+    static const long n = [] {
+        const char* e = getenv("PUF_METAL_TEST_GATE_HOLD");
+        return e ? atol(e) : 0L;
+    }();
+    static long count = 0;
+    return n > 0 && __atomic_add_fetch(&count, 1, __ATOMIC_RELAXED) == n;
+}
+
+// Pipelined horizon (metal_rollout_gate): while step t runs, step t+1 is
+// encoded and committed behind a host gate (runtime.h gate_arm) and released
+// right after the env step, so Metal's ~100 us commit -> GPU start latency
+// overlaps step t's GPU time, the wake and the env step; release -> start
+// is ~30 us. The same single dispatch with the same arguments, in the same
+// order per stream: bit-identical. If Metal released a gated step early (a
+// queue wait expires ~4 s after commit, e.g. under a stopped process), it ran
+// as an empty dispatch (gate_ran false): the step after it is cancelled and
+// both are encoded again. No gated step is pending when the horizon ends.
+// Timing events rotate over three sets (step t+1 is recorded before step
+// t-1's are read); a step's model time is from the previous step's
+// completion to its own (env step included), its copy time 0 (shared IO).
+static void metal_gated_horizon(PuffeRL* p, int buf, int group, cudaStream_t stream,
+        cudaEvent_t* ev, float* acc, int env_start, int env_end, int agent_start, int agents) {
+    VecEnv* vec = p->vec;
+    Env* envs = vec->envs;
+    int H = p->hypers.horizon;
+    static const bool hold_step = getenv("PUF_METAL_TEST_STEP_HOLD")
+        && strcmp(getenv("PUF_METAL_TEST_STEP_HOLD"), "0") != 0;
+    auto hold = [&]() {
+        if (!hold_step) return;
+        pthread_t th;
+        pthread_create(&th, NULL, metal_pack_release, puf_mtl::test_hold(stream));
+        pthread_detach(th);
+    };
+    auto set = [&](int t) { return &ev[(t % 3) * NUM_EV]; };
+    // Ungated step t: encode, commit, record.
+    auto plain = [&](int t) {
+        cudaEvent_t* e = set(t);
+        hold();
+        cudaEventRecord(e[MODEL_START], stream);
+        metal_rollout_group_step(p, buf, t, group, stream);
+        cudaEventRecord(e[MODEL_END], stream);
+        cudaEventRecord(e[COPY_END], stream);
+    };
+    bool have = false, cur_gated = false;
+    uint64_t cur = 0;
+    for (int t = 0; t < H; t++) {
+        PUF_TRACE(1, buf, t);
+        if (!have) {
+            plain(t);
+            have = true;
+            cur_gated = false;
+        }
+        PUF_TRACE(2, buf, t);
+        uint64_t next = 0;
+        if (t + 1 < H) {
+            cudaEvent_t* e = set(t + 1);
+            hold();
+            cudaEventRecord(e[MODEL_START], stream);  // = step t's commit
+            puf_mtl::gate_arm(stream);
+            metal_rollout_group_step(p, buf, t + 1, group, stream);
+            next = puf_mtl::gate_commit(stream);
+            cudaEventRecord(e[MODEL_END], stream);
+            cudaEventRecord(e[COPY_END], stream);
+        }
+        PUF_TRACE(3, buf, t);
+        cudaEventSynchronize(set(t)[COPY_END]);
+        PUF_TRACE(4, buf, t);
+        if (cur_gated && !puf_mtl::gate_ran(stream, cur)) {
+            // Released before gate_open: nothing ran. Cancel step t+1 (it
+            // would read step t's outputs), then redo step t ungated.
+            fprintf(stderr, "metal: rollout buffer %d step %d: gated step released early, "
+                "encoding it again\n", buf, t);
+            if (next) {
+                puf_mtl::gate_open(stream, false);
+                cudaEventSynchronize(set(t + 1)[COPY_END]);
+                if (puf_mtl::gate_ran(stream, next)) {
+                    puf_mtl::fatal("cancelled gated rollout step ran");
+                }
+                next = 0;
+            }
+            plain(t);
+            cudaEventSynchronize(set(t)[COPY_END]);
+        }
+        if (t > 0) metal_read_step_times(set(t - 1), acc);
+        PUF_TRACE(5, buf, t);
+        memset(&vec->rewards[agent_start], 0, agents * sizeof(float));
+        memset(&vec->terminals[agent_start], 0, agents * sizeof(float));
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        #pragma omp parallel for schedule(static) num_threads(metal_env_team(vec->num_workers, group))
+        for (int i = env_start; i < env_end; i++) {
+            puf_step(&envs[i]);
+        }
+        if (next && metal_gate_hold_now()) usleep(4500000);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        PUF_TRACE(6, buf, t);
+        acc[PROF_ENV] += (t1.tv_sec - t0.tv_sec) * 1000.0f + (t1.tv_nsec - t0.tv_nsec) / 1e6f;
+        if (next) puf_mtl::gate_open(stream, true);
+        have = next != 0;
+        cur_gated = have;
+        cur = next;
+    }
+    cudaStreamSynchronize(stream);
+    metal_read_step_times(set(H - 1), acc);
+}
+#endif
 
 // CPU worker handshake. Atomic on worker_state[]; calloc leaves BUF_STARTING.
 enum {
@@ -1129,12 +1745,14 @@ static void* vec_thread_main(void* arg) {
     int apb = vec->agents_per_buf;
     int agent_start = buf * apb;
     int env_start = vec->env_starts[buf];
-    int env_count = vec->env_counts[buf];
     Env* envs = vec->envs;
     cudaStream_t stream = pufferl->streams[buf];
     cublas_init_stream(stream);
-    cudaEvent_t ev[NUM_EV];
-    for (int i = 0; i < NUM_EV; i++) {
+    // Two sets of timing events, alternating per step: a step's model/copy
+    // times are read one step later, when their completion stamps have long
+    // been taken, instead of waiting for them right after the sync.
+    cudaEvent_t ev[3 * NUM_EV];  // the third set: metal_gated_horizon only
+    for (int i = 0; i < 3 * NUM_EV; i++) {
         cudaEventCreate(&ev[i]);
     }
     __atomic_store_n(state, BUF_WAITING, __ATOMIC_SEQ_CST);
@@ -1143,60 +1761,113 @@ static void* vec_thread_main(void* arg) {
     float ms = 0.0f;
     while (true) {
         while (__atomic_load_n(state, __ATOMIC_SEQ_CST) != BUF_RUNNING) {
+#ifdef PUF_METAL
+            int group = __atomic_load_n(&pufferl->metal_rollout_group, __ATOMIC_RELAXED);
+            if (group > 1 && buf % group) usleep(1000);
+#endif
             if (__atomic_load_n(&vec->shutdown, __ATOMIC_SEQ_CST)) {
-                for (int i = 0; i < NUM_EV; i++) {
+                for (int i = 0; i < 3 * NUM_EV; i++) {
                     cudaEventDestroy(ev[i]);
                 }
                 return NULL;
             }
         }
         if (__atomic_load_n(&vec->shutdown, __ATOMIC_SEQ_CST)) {
-            for (int i = 0; i < NUM_EV; i++) {
+            for (int i = 0; i < 3 * NUM_EV; i++) {
                 cudaEventDestroy(ev[i]);
             }
             return NULL;
         }
         int h2d_pending = 0;
+        int group = 1;
+#ifdef PUF_METAL
+        group = pufferl->metal_rollout_group;
+#endif
+        int agents = apb * group;
+        int last_buf = buf + group - 1;
+        int env_end = vec->env_starts[last_buf] + vec->env_counts[last_buf];
+#ifdef PUF_METAL
+        if (pufferl->metal_rollout_gate) {
+            metal_gated_horizon(pufferl, buf, group, stream, ev, my_accum, env_start, env_end,
+                agent_start, agents);
+            for (int i = 0; i < NUM_PROF; i++) my_accum[i] *= group;
+            __atomic_store_n(state, BUF_WAITING, __ATOMIC_SEQ_CST);
+            continue;
+        }
+#endif
         for (int t = 0; t < horizon; t++) {
-            cudaEventRecord(ev[MODEL_START], stream);
+            cudaEvent_t* tev = &ev[(t & 1) * NUM_EV];
+            cudaEvent_t* pev = &ev[(~t & 1) * NUM_EV];
+#ifdef PUF_METAL
+            static const bool hold_step = getenv("PUF_METAL_TEST_STEP_HOLD")
+                && strcmp(getenv("PUF_METAL_TEST_STEP_HOLD"), "0") != 0;
+            if (hold_step) {
+                pthread_t th;
+                pthread_create(&th, NULL, metal_pack_release, puf_mtl::test_hold(stream));
+                pthread_detach(th);
+            }
+#endif
+            PUF_TRACE(1, buf, t);
+            cudaEventRecord(tev[MODEL_START], stream);
+#ifdef PUF_METAL
+            if (group > 1) metal_rollout_group_step(pufferl, buf, t, group, stream);
+            else
+#endif
             pufferl_forward(pufferl, buf, t, stream);
-            cudaEventRecord(ev[MODEL_END], stream);
+            PUF_TRACE(2, buf, t);
+            cudaEventRecord(tev[MODEL_END], stream);
+            PUF_TRACE(3, buf, t);
+#ifdef PUF_METAL
+            if (!metal_shared_env()) {
+#endif
             cudaMemcpyAsync(
                 &vec->actions[agent_start * NUM_ATNS],
                 &pufferl->env.actions.data[agent_start * NUM_ATNS],
-                apb * NUM_ATNS * sizeof(float),
+                agents * NUM_ATNS * sizeof(float),
                 cudaMemcpyDeviceToHost, stream);
-            cudaEventRecord(ev[COPY_END], stream);
+#ifdef PUF_METAL
+            }
+#endif
+            cudaEventRecord(tev[COPY_END], stream);
             cudaStreamSynchronize(stream);
-            cudaEventElapsedTime(&ms, ev[MODEL_START], ev[MODEL_END]);
-            my_accum[PROF_MODEL] += ms;
-            cudaEventElapsedTime(&ms, ev[MODEL_END], ev[COPY_END]);
-            my_accum[PROF_COPY] += ms;
-            if (h2d_pending) {
+            PUF_TRACE(4, buf, t);
+            if (h2d_pending) {  // step t - 1's events
+                cudaEventElapsedTime(&ms, pev[MODEL_START], pev[MODEL_END]);
+                my_accum[PROF_MODEL] += ms;
+                cudaEventElapsedTime(&ms, pev[MODEL_END], pev[COPY_END]);
+                my_accum[PROF_COPY] += ms;
                 cudaEventElapsedTime(&ms, ev[H2D_START], ev[H2D_END]);
                 my_accum[PROF_COPY] += ms;
                 h2d_pending = 0;
             }
-            memset(&vec->rewards[agent_start], 0, apb * sizeof(float));
-            memset(&vec->terminals[agent_start], 0, apb * sizeof(float));
+            PUF_TRACE(5, buf, t);
+            memset(&vec->rewards[agent_start], 0, agents * sizeof(float));
+            memset(&vec->terminals[agent_start], 0, agents * sizeof(float));
             clock_gettime(CLOCK_MONOTONIC, &t0);
-            #pragma omp parallel for schedule(static) num_threads(vec->num_workers)
-            for (int i = env_start; i < env_start + env_count; i++) {
+            #pragma omp parallel for schedule(static) num_threads(metal_env_team(vec->num_workers, group))
+            for (int i = env_start; i < env_end; i++) {
                 puf_step(&envs[i]);
             }
             clock_gettime(CLOCK_MONOTONIC, &t1);
+            PUF_TRACE(6, buf, t);
             my_accum[PROF_ENV] += (t1.tv_sec - t0.tv_sec) * 1000.0f
                 + (t1.tv_nsec - t0.tv_nsec) / 1e6f;
             cudaEventRecord(ev[H2D_START], stream);
-            cpu_upload(pufferl, agent_start, apb, stream);
+            cpu_upload(pufferl, agent_start, agents, stream);
             cudaEventRecord(ev[H2D_END], stream);
             h2d_pending = 1;
         }
         cudaStreamSynchronize(stream);
         if (h2d_pending) {
+            cudaEvent_t* lev = &ev[((horizon - 1) & 1) * NUM_EV];
+            cudaEventElapsedTime(&ms, lev[MODEL_START], lev[MODEL_END]);
+            my_accum[PROF_MODEL] += ms;
+            cudaEventElapsedTime(&ms, lev[MODEL_END], lev[COPY_END]);
+            my_accum[PROF_COPY] += ms;
             cudaEventElapsedTime(&ms, ev[H2D_START], ev[H2D_END]);
             my_accum[PROF_COPY] += ms;
         }
+        for (int i = 0; i < NUM_PROF; i++) my_accum[i] *= group;
         __atomic_store_n(state, BUF_WAITING, __ATOMIC_SEQ_CST);
     }
 }
@@ -1290,7 +1961,11 @@ static void rollout_start(PuffeRL* p) {
         }
         return;
     }
-    for (int buf = 0; buf < p->vec->buffers; buf++) {
+    int group = 1;
+#ifdef PUF_METAL
+    group = p->metal_rollout_group;
+#endif
+    for (int buf = 0; buf < p->vec->buffers; buf += group) {
         int* state = &p->vec->worker_state[buf];
         __atomic_store_n(state, BUF_RUNNING, __ATOMIC_SEQ_CST);
     }
@@ -1340,6 +2015,9 @@ void rollout_finish(PuffeRL* p, double t0) {
     p->profile.accum[PROF_MODEL] += eval_prof[PROF_MODEL] / p->vec->buffers;
     p->profile.accum[PROF_ENV] += eval_prof[PROF_ENV] / p->vec->buffers;
     p->profile.accum[PROF_COPY] += eval_prof[PROF_COPY] / p->vec->buffers;
+#ifdef PUF_WARM_START_TEST
+    puf_warm_start_test_dump_rollout(p);
+#endif
 }
 
 static void env_close(VecEnv* vec) {
@@ -1404,6 +2082,7 @@ static Float slice_rows(Float p, int off, int n) {
     return out;
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 // Transpose (A, B, C) → (B, A, C). Sequential, coalesced on dest rows.
 // Two types: actions are float32 (large discrete IDs); everything else is Prec.
 __global__ void transpose_102(precision_t* dst, const precision_t* src,
@@ -1434,6 +2113,7 @@ __global__ void transpose_102(float* dst, const float* src, int A, int B, int C)
     dst[b * A * C + a * C + c] = src[idx];
 }
 #endif
+#endif  // PUF_METAL
 
 // Cosine decay base → min over t in [0, T). Double for t/T (float loses
 // precision past 2^24). Caller passes epoch and total train epochs.
@@ -1442,6 +2122,7 @@ float cosine_annealing(float base, float min_v, long t, long T) {
     return min_v + 0.5f * (base - min_v) * (1.0f + (float)cos(M_PI * u));
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 __global__ void clamp_precision_kernel(precision_t* dst, float lo, float hi, int n) {
     for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
             idx += blockDim.x * gridDim.x) {
@@ -1456,36 +2137,51 @@ __global__ void puf_stamp(unsigned long long* dst) {
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
     *dst = t;
 }
+#endif  // PUF_METAL
+
+#ifdef PUF_GOLDEN_DUMP
+#include "../tests/metal_ref/train_dump.h"
+#endif
 
 static void train_epoch_gpu(PuffeRL* pufferl, RolloutBuf src, int slot,
         cudaStream_t stream) {
     Hypers* hypers = &pufferl->hypers;
-    RolloutBuf* rollouts = &pufferl->train_rollouts;
+    RolloutBuf train = pufferl->train_rollouts;
+    RolloutBuf* rollouts = &train;
     unsigned long long* st = pufferl->profile.stamps + slot * NUM_TE;
-    puf_stamp<<<1, 1, 0, stream>>>(st + TE_S);
+    PUF_LAUNCH(puf_stamp, 1, 1, 0, stream)(st + TE_S);
 
     int T = src.observations.shape[0];
     int B = src.observations.shape[1];
     int obs_size = (int)src.observations.shape[2];
     int num_atns = (int)src.actions.shape[2];
     int mask_c = src.action_mask.shape[2];
-    transpose_102<<<grid_size(T * B * obs_size), BLOCK_SIZE, 0, stream>>>(
-        rollouts->observations.data, src.observations.data, T, B, obs_size);
-    transpose_102<<<grid_size(T * B * num_atns), BLOCK_SIZE, 0, stream>>>(
+#ifdef PUF_METAL
+    if (pufferl->metal_obs_bt[slot]) {
+        // Alias only the completed ready slot. The producer writes the other
+        // slot, and the standard train/dW join precedes this slot's reuse.
+        rollouts->observations = {.data = src.observations.data, .shape = {B, T, obs_size}};
+    } else
+#endif
+    {
+        PUF_LAUNCH(transpose_102, grid_size(T * B * obs_size), BLOCK_SIZE, 0, stream)(
+            rollouts->observations.data, src.observations.data, T, B, obs_size);
+    }
+    PUF_LAUNCH(transpose_102, grid_size(T * B * num_atns), BLOCK_SIZE, 0, stream)(
         rollouts->actions.data, src.actions.data, T, B, num_atns);
-    transpose_102<<<grid_size(T * B), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(transpose_102, grid_size(T * B), BLOCK_SIZE, 0, stream)(
         rollouts->logprobs.data, src.logprobs.data, T, B, 1);
-    transpose_102<<<grid_size(T * B), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(transpose_102, grid_size(T * B), BLOCK_SIZE, 0, stream)(
         rollouts->rewards.data, src.rewards.data, T, B, 1);
-    transpose_102<<<grid_size(T * B), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(transpose_102, grid_size(T * B), BLOCK_SIZE, 0, stream)(
         rollouts->terminals.data, src.terminals.data, T, B, 1);
-    transpose_102<<<grid_size(T * B), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(transpose_102, grid_size(T * B), BLOCK_SIZE, 0, stream)(
         rollouts->values.data, src.values.data, T, B, 1);
-    transpose_102<<<grid_size(T * B * mask_c), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(transpose_102, grid_size(T * B * mask_c), BLOCK_SIZE, 0, stream)(
         rollouts->action_mask.data, src.action_mask.data, T, B, mask_c);
 
-    clamp_precision_kernel<<<grid_size(
-        numel(rollouts->rewards.shape)), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(clamp_precision_kernel, grid_size(
+        numel(rollouts->rewards.shape)), BLOCK_SIZE, 0, stream)(
         rollouts->rewards.data, -1.0f, 1.0f, numel(rollouts->rewards.shape));
 
     if (hypers->reset_every_horizon || src.initial_states.data == NULL) {
@@ -1497,7 +2193,7 @@ static void train_epoch_gpu(PuffeRL* pufferl, RolloutBuf src, int slot,
             numel(pufferl->train_state.shape) * sizeof(precision_t),
             cudaMemcpyDeviceToDevice, stream);
     }
-    puf_stamp<<<1, 1, 0, stream>>>(st + TE_MID);
+    PUF_LAUNCH(puf_stamp, 1, 1, 0, stream)(st + TE_MID);
 
     int batch_size = hypers->total_agents * hypers->horizon;
     int mb_segs = hypers->minibatch_size / hypers->horizon;
@@ -1529,7 +2225,7 @@ static void train_epoch_gpu(PuffeRL* pufferl, RolloutBuf src, int slot,
             graph.mb_terminals, dest_off, graph, p_logstd,
             pufferl->act_sizes, pufferl->ppo_bufs.grad_logits.data,
             pufferl->ppo_bufs.grad_values.data, stream);
-        puff_advantage<<<adv_grid, ADV_THREADS, 0, stream>>>(
+        PUF_LAUNCH(puff_advantage, adv_grid, ADV_THREADS, 0, stream)(
             graph.mb_gae_v.data, graph.mb_rewards.data,
             graph.mb_terminals.data,
             hypers->vtrace ? graph.mb_imp.data : NULL,
@@ -1544,6 +2240,9 @@ static void train_epoch_gpu(PuffeRL* pufferl, RolloutBuf src, int slot,
             pufferl->ppo_bufs.ent_coef,
             pufferl->ppo_bufs, pufferl->is_continuous, stream);
 
+#ifdef PUF_GOLDEN_DUMP
+        golden_minibatch(pufferl, mb, stream);
+#endif
         Float grad_logits = pufferl->ppo_bufs.grad_logits;
         Float grad_logstd = pufferl->is_continuous
             ? pufferl->ppo_bufs.grad_logstd : Float();
@@ -1560,11 +2259,11 @@ static void train_epoch_gpu(PuffeRL* pufferl, RolloutBuf src, int slot,
             pufferl->grad, hypers->max_grad_norm, stream);
         if (USE_BF16) {
             int n = numel(primary->param.shape);
-            cast<<<grid_size(n), BLOCK_SIZE, 0, stream>>>(
+            PUF_LAUNCH(cast, grid_size(n), BLOCK_SIZE, 0, stream)(
                 primary->param.data, primary->master_weights.data, n);
         }
     }
-    puf_stamp<<<1, 1, 0, stream>>>(st + TE_E);
+    PUF_LAUNCH(puf_stamp, 1, 1, 0, stream)(st + TE_E);
 }
 
 void train_impl(PuffeRL* pufferl, RolloutBuf* src_arg) {
@@ -1602,6 +2301,9 @@ void train_impl(PuffeRL* pufferl, RolloutBuf* src_arg) {
         sizeof(float), cudaMemcpyHostToDevice, train_stream);
 
     int slot = hypers->async ? pufferl->async_ready_slot : 0;
+#ifdef PUF_GOLDEN_DUMP
+    golden_before_train(pufferl, src, slot);
+#endif
     int total_minibatches = hypers->replay_ratio * batch_size / hypers->minibatch_size;
     bool first = hypers->cudagraphs && pufferl->train_cudagraph[slot] == NULL;
     profile_begin("train_forward_backward", hypers->profile);
@@ -1628,6 +2330,7 @@ void train_impl(PuffeRL* pufferl, RolloutBuf* src_arg) {
         train_epoch_gpu(pufferl, src, slot, train_stream);
     }
     profile_end(hypers->profile);
+    PUF_TRACE(12, 0, 0);
 
     cudaStreamSynchronize(train_stream);
 
@@ -1640,6 +2343,9 @@ void train_impl(PuffeRL* pufferl, RolloutBuf* src_arg) {
         pufferl->profile.accum[PROF_TRAIN_MODEL] +=
             (float)(h[TE_E] - h[TE_MID]) * 1e-6f;
     }
+#ifdef PUF_GOLDEN_DUMP
+    golden_after_train(pufferl);
+#endif
     pufferl->epoch += 1;
 }
 
@@ -1719,6 +2425,58 @@ const char* puf_checkpoint_path_key(Ini* ini, const char* key,
     return out;
 }
 
+// Legacy checkpoint bytes are a flat master-weight array, including allocator
+// padding. Equal element counts alone cannot identify the source precision.
+static bool puf_checkpoint_layout_dependent(Allocator* alloc) {
+    size_t bf = 0, fp = 0;
+    for (int i = 0; i < alloc->num_regs; i++) {
+        bf = (bf + 15) & ~size_t(15);
+        fp = (fp + 15) & ~size_t(15);
+        if (bf / 2 != fp / 4) return true;
+        size_t n = numel(alloc->regs[i].shape);
+        bf += n * 2;
+        fp += n * 4;
+    }
+    return false;
+}
+
+static void puf_checkpoint_layout_path(char* out, size_t n, const char* path) {
+    int len = snprintf(out, n, "%s.layout", path);
+    assert(len >= 0 && (size_t)len < n && "checkpoint layout path too long");
+}
+
+static void puf_checkpoint_check_layout(Allocator* alloc, const char* path) {
+    if (!puf_checkpoint_layout_dependent(alloc)) return;
+    // Let the ordinary loader retain its missing-file/size diagnostics.
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)
+            || st.st_size != (off_t)(alloc->total_elems * sizeof(float))) return;
+    char layout[4096];
+    puf_checkpoint_layout_path(layout, sizeof(layout), path);
+    FILE* fp = fopen(layout, "r");
+    if (!fp) {
+        // Legacy checkpoints (and upstream ones) carry no sidecar: keep loading
+        // them as before, i.e. assume they were written by this build precision.
+        fprintf(stderr,
+            "warning: %s has precision-dependent padding and no .layout sidecar; "
+            "assuming it was saved by this build's precision (%s). Loading a "
+            "checkpoint from the other precision would misplace weights.\n",
+            path, sizeof(precision_t) == 2 ? "BF16" : "FP32");
+        return;
+    }
+    int source_bytes = 0;
+    bool known = fscanf(fp, "PUF_LAYOUT_V1 %d", &source_bytes) == 1
+        && (source_bytes == 2 || source_bytes == 4);
+    fclose(fp);
+    if (!known || source_bytes != sizeof(precision_t)) {
+        fprintf(stderr,
+            "checkpoint parameter layout mismatch: %s has precision-dependent "
+            "padding. Cross-precision loading is unsupported for this layout; "
+            "use the original build precision and retain its .layout sidecar.\n", path);
+        exit(1);
+    }
+}
+
 void puf_save_weights(PuffeRL* p, const char* path) {
     Float mw = p->policies[0].master_weights;
     int64_t nbytes = numel(mw.shape) * sizeof(float);
@@ -1733,22 +2491,63 @@ void puf_save_weights(PuffeRL* p, const char* path) {
     fclose(fp);
     free(buf);
     assert(rename(tmp, path) == 0 && "failed to publish weights");
+    // Preserve the raw checkpoint format and seeded hashes. Only layouts whose
+    // padding differs need source-precision metadata alongside those bytes.
+    if (puf_checkpoint_layout_dependent(&p->policies[0].params_alloc)) {
+        char layout[4096], layout_tmp[4096];
+        puf_checkpoint_layout_path(layout, sizeof(layout), path);
+        snprintf(layout_tmp, sizeof(layout_tmp), "%s.tmp.%d", layout, getpid());
+        FILE* meta = fopen(layout_tmp, "w");
+        assert(meta && "failed to open checkpoint layout metadata");
+        assert(fprintf(meta, "PUF_LAYOUT_V1 %zu\n", sizeof(precision_t)) > 0);
+        assert(fclose(meta) == 0);
+        assert(rename(layout_tmp, layout) == 0 && "failed to publish checkpoint layout metadata");
+    }
 }
 
 void puf_load_weights_into(Float dst, Prec params,
         cudaStream_t stream, const char* path) {
     int64_t nbytes = numel(dst.shape) * sizeof(float);
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        fprintf(stderr, "checkpoint load failed: %s: %s\n", path, strerror(errno));
+        exit(1);
+    }
+    if (!S_ISREG(st.st_mode) || st.st_size != (off_t)nbytes) {
+        fprintf(stderr,
+            "checkpoint shape/precision mismatch: %s has %lld bytes; policy expects "
+            "%lld bytes (%lld serialized FP32 master weights). Check the environment, "
+            "policy.hidden_size, and policy.num_layers; BF16 and FP32 builds both use "
+            "FP32 checkpoint files.\n",
+            path, (long long)st.st_size, (long long)nbytes,
+            (long long)numel(dst.shape));
+        exit(1);
+    }
     FILE* fp = fopen(path, "rb");
-    assert(fp && "failed to open weights for reading");
+    if (!fp) {
+        fprintf(stderr, "checkpoint load failed: %s: %s\n", path, strerror(errno));
+        exit(1);
+    }
     char* buf = (char*)malloc(nbytes);
+    if (!buf) {
+        fprintf(stderr, "checkpoint load failed: cannot allocate %lld host bytes\n",
+            (long long)nbytes);
+        fclose(fp);
+        exit(1);
+    }
     size_t nread = fread(buf, 1, nbytes, fp);
     fclose(fp);
-    assert((int64_t)nread == nbytes && "failed to read weights");
+    if ((int64_t)nread != nbytes) {
+        fprintf(stderr, "checkpoint load failed: short read from %s (%zu/%lld bytes)\n",
+            path, nread, (long long)nbytes);
+        free(buf);
+        exit(1);
+    }
     cudaMemcpy(dst.data, buf, nbytes, cudaMemcpyHostToDevice);
     free(buf);
     if (USE_BF16) {
         int n = numel(params.shape);
-        cast<<<grid_size(n), BLOCK_SIZE, 0, stream>>>(params.data, dst.data, n);
+        PUF_LAUNCH(cast, grid_size(n), BLOCK_SIZE, 0, stream)(params.data, dst.data, n);
     }
 }
 
@@ -1756,8 +2555,14 @@ void puf_load_weights_into(Float dst, Prec params,
 void pufferl_load_policy(PuffeRL* pufferl, int i, const char* path) {
     assert(i >= 0 && i < pufferl->num_policies);
     Policy* pol = &pufferl->policies[i];
+#ifndef PUF_TEST_SKIP_CHECKPOINT_LAYOUT
+    puf_checkpoint_check_layout(&pol->params_alloc, path);
+#endif
     puf_load_weights_into(pol->master_weights, pol->param,
         pufferl->default_stream, path);
+#if defined(PUFFER_NETHACK) && defined(NH_MSG_FROZEN)
+    nethack_refresh_weight_cache(pol->weights.encoder, pufferl->default_stream);
+#endif
     cudaDeviceSynchronize();
 }
 
@@ -1770,7 +2575,7 @@ static void master_weights_setup(Float* mw, Prec* param,
         *mw = (Float){.shape = {n}};
         cudaMalloc((void**)&mw->data, n * sizeof(float));
         if (cast_now) {
-            cast<<<grid_size(n), BLOCK_SIZE, 0, stream>>>(mw->data, param->data, n);
+            PUF_LAUNCH(cast, grid_size(n), BLOCK_SIZE, 0, stream)(mw->data, param->data, n);
         }
     } else {
         *mw = (Float){.data = (float*)param->data, .shape = {n}};
@@ -1805,7 +2610,11 @@ PuffeRL* create_pufferl(Ini* ini, TrainContext* ctx) {
         .vtrace_c_clip = puf_ini_get(ini, "train", "vtrace_c_clip"),
         .async = puf_ini_get(ini, "base", "async") != 0,
         .reset_every_horizon = puf_ini_get(ini, "base", "reset_every_horizon") != 0,
+#ifdef PUF_METAL
+        .cudagraphs = false,  // CUDA graphs have no Metal equivalent
+#else
         .cudagraphs = puf_ini_get(ini, "base", "cudagraphs") >= 0,
+#endif
         .profile = puf_ini_get(ini, "base", "profile") != 0,
         .rank = ctx->rank,
         .world_size = ctx->world_size,
@@ -1823,6 +2632,9 @@ PuffeRL* create_pufferl(Ini* ini, TrainContext* ctx) {
     snprintf(pufferl->env_name, sizeof(pufferl->env_name), "%s", PUFFER_ENV_NAME);
 
     cudaSetDevice(hypers.gpu_id);
+#ifdef PUF_METAL
+    puf_mtl::MemoryInfo memory_at_create = puf_mtl::memory_info();
+#endif
     cublas_init_handle();
 
     if (hypers.world_size > 1) {
@@ -1996,6 +2808,104 @@ PuffeRL* create_pufferl(Ini* ini, TrainContext* ctx) {
 
     muon_init(&pufferl->muon, &primary->params_alloc, hypers.momentum, acts);
 
+#ifdef PUF_METAL
+#ifndef PUF_METAL_MEMORY_PREFLIGHT
+#define PUF_METAL_MEMORY_PREFLIGHT 1
+#endif
+    if (PUF_METAL_MEMORY_PREFLIGHT) {
+        // Conservative shared-buffer peak: registered pools, later rollout
+        // streams/workspaces, eligible packed weights, and one init scratch.
+        // Driver-private command/pipeline storage is not predictable here.
+        auto rounded = [](size_t n) {
+            const size_t page = 16 * 1024;
+            n = n ? n : 1;
+            return (n + page - 1) / page * page;
+        };
+        size_t future = 0, largest = 0, init_scratch = 0;
+        auto planned = [&](size_t n) {
+            size_t bytes = rounded(n);
+            future += bytes;
+            if (bytes > largest) largest = bytes;
+        };
+        for (int b = 0; b < pufferl->num_policies; b++) {
+            Policy* pol = &pufferl->policies[b];
+            planned((size_t)pol->params_alloc.total_bytes);
+            if (pol->frozen) planned((size_t)pol->activ_alloc.total_bytes);
+            if (USE_BF16) planned((size_t)pol->params_alloc.total_elems * sizeof(float));
+            if (b == 0) {
+                // Kaiming uses a full FP32 tensor even in FP32 builds;
+                // normal init rounds an odd element count up to an even one.
+                for (int j = 0; j < pol->params_alloc.num_regs; j++) {
+                    size_t n = numel(pol->params_alloc.regs[j].shape);
+                    init_scratch = (std::max)(init_scratch, rounded(((n + 1) & ~size_t(1)) * sizeof(float)));
+                }
+            }
+        }
+        if (hypers.async) planned((size_t)pufferl->weight_alloc.total_bytes);
+        planned((size_t)grads->total_bytes);
+        planned((size_t)acts->total_bytes);
+        for (int i = 0; i < num_buffers; i++) {
+            planned((size_t)agents_per_buf * sizeof(curandStatePhilox4_32_10_t));
+            // stream_create's four constant rings and progress/gate words.
+            future += puf_mtl::stream_buffer_bytes();
+            if (PUF_BACKEND != PUF_GPU || i == 0) planned(kCublasWsBytes);
+        }
+#if defined(PUFFER_NETHACK) && defined(NH_MSG_FROZEN)
+        for (int b = 0; b < pufferl->num_policies; b++) {
+            planned((size_t)NH_MSG_VOCAB * NH_MSG_HID * sizeof(precision_t));
+        }
+#endif
+        size_t packed_bytes = 0;
+        if (metal_rollout_pack_split(pufferl)) {
+            packed_bytes = puf_mtl::rollout_packed_floats(input_size, hidden_size,
+                num_layers, decoder_output_size + 1) * sizeof(float);
+            planned(packed_bytes);
+        }
+        largest = (std::max)(largest, init_scratch);
+        puf_mtl::MemoryInfo now = puf_mtl::memory_info();
+        size_t config_live = now.process_live >= memory_at_create.process_live
+            ? now.process_live - memory_at_create.process_live : now.process_live;
+        size_t outside = now.current_allocated > config_live
+            ? now.current_allocated - config_live : 0;
+        size_t available = now.recommended_max_working_set > outside
+            ? now.recommended_max_working_set - outside : 0;
+        size_t hard_limit = now.max_buffer_length;
+#ifdef PUF_METAL_MEMORY_TEST
+        const char* test_budget = getenv("PUF_METAL_TEST_MEMORY_BUDGET_BYTES");
+        if (test_budget && *test_budget) available = (size_t)strtoull(test_budget, NULL, 10);
+        const char* test_limit = getenv("PUF_METAL_TEST_MAX_BUFFER_BYTES");
+        if (test_limit && *test_limit) hard_limit = (size_t)strtoull(test_limit, NULL, 10);
+#endif
+        size_t requested = config_live + future + init_scratch;
+#ifdef PUF_METAL_MEMORY_TEST
+        fprintf(stderr, "metal memory plan: live=%zu future=%zu init_scratch=%zu "
+            "packed=%zu stream_buffers=%zu workspace=%zu buffers=%d peak=%zu largest=%zu recommended=%zu max_buffer=%zu\n",
+            config_live, future, init_scratch, packed_bytes, puf_mtl::stream_buffer_bytes(),
+            kCublasWsBytes, num_buffers, requested, largest, available, hard_limit);
+        // Inspect real large geometries without allocating them on a shared GPU.
+#endif
+        if (largest > hard_limit || requested > available) {
+            bool hard = largest > hard_limit;
+            fprintf(stderr,
+                "metal: %s: requested %.3f GB peak, recommended available %.3f GB "
+                "(MTLDevice recommendedMaxWorkingSetSize %.3f GB; %.3f GB already used "
+                "outside this trainer; largest page-rounded allocation %.3f GB, "
+                "maxBufferLength %.3f GB).\n"
+                "Reduce vec.total_agents, train.minibatch_size, train.horizon, or "
+                "policy.hidden_size; try BF16 or base.async=0 to reduce memory.\n",
+                hard ? "configuration memory preflight failed (hard buffer limit)"
+                     : "WARNING: configuration exceeds the working-set recommendation; continuing",
+                requested / 1e9, available / 1e9,
+                now.recommended_max_working_set / 1e9, outside / 1e9,
+                largest / 1e9, hard_limit / 1e9);
+            if (hard) exit(1);
+        }
+#ifdef PUF_METAL_MEMORY_TEST
+        if (getenv("PUF_METAL_TEST_PLAN_ONLY")) exit(0);
+#endif
+    }
+#endif
+
     // Allocate all policy param/activ pools, then train grads + shared acts.
     for (int b = 0; b < pufferl->num_policies; b++) {
         Policy* pol = &pufferl->policies[b];
@@ -2025,6 +2935,14 @@ PuffeRL* create_pufferl(Ini* ini, TrainContext* ctx) {
     ulong init_seed = hypers.seed;
     weights_init(&primary->arch,
         primary->weights, &init_seed, pufferl->default_stream);
+#if defined(PUFFER_NETHACK) && defined(NH_MSG_FROZEN)
+    if (hypers.async) {
+        // Actor snapshots share policy 0's frozen table, not an uninitialized
+        // cache in the separately created actor weight object.
+        auto* actor = (NethackEncoderWeights*)pufferl->actor_weights.encoder;
+        actor->msg_w0_dev = ((NethackEncoderWeights*)primary->weights.encoder)->msg_w0_dev;
+    }
+#endif
     // Primary: cast param→master now. Frozen: load later via pufferl_load_policy.
     for (int b = 0; b < pufferl->num_policies; b++) {
         Policy* pol = &pufferl->policies[b];
@@ -2044,7 +2962,7 @@ PuffeRL* create_pufferl(Ini* ini, TrainContext* ctx) {
             agents_per_buf * sizeof(curandStatePhilox4_32_10_t));
         cudaMemset(pufferl->rng_states[i], 0,
             agents_per_buf * sizeof(curandStatePhilox4_32_10_t));
-        rng_init<<<grid_size(agents_per_buf), BLOCK_SIZE>>>(
+        PUF_LAUNCH(rng_init, grid_size(agents_per_buf), BLOCK_SIZE, 0, 0)(
             pufferl->rng_states[i], pufferl->seed + i, agents_per_buf);
     }
 
@@ -2070,6 +2988,19 @@ PuffeRL* create_pufferl(Ini* ini, TrainContext* ctx) {
         if (hypers.async) {
             assert(cudaStreamCreateWithFlags(
                 &pufferl->streams[i], cudaStreamNonBlocking) == cudaSuccess);
+#ifdef PUF_METAL
+            // Gated steps (metal_gated_horizon) need host-wait-only streams,
+            // a single buffer's too (nothing on the GPU waits for it in
+            // async mode). PUF_METAL_LAZY_PROGRESS=0 keeps progress words
+            // and so also disables gating.
+            const char* lazy = getenv("PUF_METAL_LAZY_PROGRESS");
+            bool lazy_on = !lazy || strcmp(lazy, "0") != 0;
+            pufferl->metal_gate_streams = lazy_on && metal_gate_env() && puf_mtl::gate_available();
+            if (lazy_on && (num_buffers > 1 || pufferl->metal_gate_streams)) {
+                puf_mtl::stream_host_wait_only(pufferl->streams[i]);
+            }
+            puf_mtl::stream_wait_spin(pufferl->streams[i], metal_rollout_spin_us());
+#endif
         } else {
             assert(cudaStreamCreate(&pufferl->streams[i]) == cudaSuccess);
         }
@@ -2080,6 +3011,10 @@ PuffeRL* create_pufferl(Ini* ini, TrainContext* ctx) {
     }
 
     env_start(pufferl);
+#ifdef PUF_METAL_MEMORY_TEST
+    fprintf(stderr, "metal memory actual: created=%zu\n",
+        puf_mtl::memory_info().process_live - memory_at_create.process_live);
+#endif
 
     if (hypers.profile) {
         cudaDeviceSynchronize();
@@ -2424,8 +3359,19 @@ static void puf_log_history_add(PufLogHistory* h, Dict* log) {
     h->size++;
 }
 
-// Bin-mean of history[key] over agent_steps into out[0..points-1]. Dense keys.
-// points==1 → last value only. Last bin forced to final sample.
+// Refresh trainer fields even when no episodes completed. Only absent fields
+// (normally env/* episode statistics) carry forward from the previous log.
+static void puf_log_snapshot_update(Dict* snapshot, Dict* log) {
+    for (int i = 0; i < log->size; i++) {
+        dict_set(snapshot, log->items[i].key, log->items[i].value);
+    }
+}
+
+// points-1 equal-width bins [j*w, (j+1)*w), w=final_steps/(points-1),
+// followed by the exact final snapshot. Empty bins carry the last non-empty
+// bin's mean; leading empty bins use the first observed value of the key.
+// Absent keys do not contribute samples. History has ordered agent_steps.
+// points==1 returns only the final value (also valid for zero final_steps).
 static void log_history_bin_mean(PufLogHistory* h, const char* key,
         int points, double* out) {
     assert(h->size > 0 && points >= 1);
@@ -2437,21 +3383,31 @@ static void log_history_bin_mean(PufLogHistory* h, const char* key,
     int out_idx = 0;
     int bin_n = 0;
     double bin_sum = 0;
-    double fallback = dict_get(&h->items[0], key);
+    double fallback = dict_get(&h->items[h->size - 1], key);
+    for (int i = 0; i < h->size; i++) {
+        DictItem* item = dict_find(&h->items[i], key);
+        if (item) {
+            fallback = item->value;
+            break;
+        }
+    }
     double next_bin = final_steps / (points - 1);
     for (int i = 0; i < h->size; i++) {
         Dict* log = &h->items[i];
-        bin_sum += dict_get(log, key);
-        bin_n++;
+        DictItem* item = dict_find(log, key);
+        if (!item) continue;
         double steps = dict_get(log, "agent_steps");
-        if (steps < next_bin || out_idx >= points - 1) {
-            continue;
+        // Close ALL preceding bins before assigning this sample. In particular,
+        // a late sample must never be pulled backward into an earlier empty bin.
+        while (out_idx < points - 1 && steps >= next_bin) {
+            fallback = bin_n ? bin_sum / bin_n : fallback;
+            out[out_idx++] = fallback;
+            bin_n = 0;
+            bin_sum = 0;
+            next_bin = final_steps * (out_idx + 1) / (points - 1);
         }
-        fallback = bin_n ? bin_sum / bin_n : fallback;
-        out[out_idx++] = fallback;
-        bin_n = 0;
-        bin_sum = 0;
-        next_bin += final_steps / (points - 1);
+        bin_sum += item->value;
+        bin_n++;
     }
     out[points - 1] = dict_get(&h->items[h->size - 1], key);
     while (out_idx < points - 1) {
@@ -2464,13 +3420,76 @@ double rollout_start(PuffeRL* p, int slot) {
     nethack_policy_on_rollout(p->global_step, p->hypers.total_timesteps);
 #endif
     p->write_slot = slot;
+#ifdef PUF_METAL
+    static const bool obs_bt = [] {
+#ifdef PUF_GOLDEN_DUMP
+        // Golden capture externalizes the original time-major rollout tensor.
+        return false;
+#else
+        const char* e = getenv("PUF_METAL_OBS_BT");
+        return !e || strcmp(e, "0") != 0;
+#endif
+    }();
+    // Preflight every block before selecting a slot's layout. All eligibility
+    // inputs (architecture, shapes, policy layout and toggles) stay constant
+    // within the horizon; t=0 also checks the optional state snapshot.
+    bool bt = obs_bt;
+    RolloutBuf view = rollout_time_view(&p->rollouts,
+        slot * p->hypers.horizon, p->hypers.horizon);
+    int block = p->hypers.total_agents / p->hypers.num_buffers;
+    for (int b = 0; b < p->hypers.num_buffers && bt; ++b) {
+        bt = metal_rollout_step(p, b, 0, view, &p->env, b * block, block,
+            slot, p->streams[b], true, true);
+    }
+    p->metal_obs_bt[slot] = bt;
+#endif
     if (p->hypers.async) {
         Prec* param = &p->policies[0].param;
         int64_t n = numel(param->shape);
         cudaMemcpyAsync(p->actor_param.data, param->data,
             n * sizeof(precision_t), cudaMemcpyDeviceToDevice, p->default_stream);
+#ifdef PUF_METAL
+        metal_rollout_pack(p, slot, view);  // behind the copy, same sync
+#endif
         cudaStreamSynchronize(p->default_stream);
     }
+#ifdef PUF_METAL
+    else {
+        metal_rollout_pack(p, slot, view);
+        cudaStreamSynchronize(p->default_stream);
+    }
+    // Gated steps: one packed dispatch per step (grouped or single buffer)
+    // reading the shared env IO, nothing else on the stream.
+    bool gate = p->metal_gate_streams && p->hypers.async && metal_shared_env()
+        && p->metal_packed_split && PUF_BACKEND != PUF_GPU;
+    for (int b = 0; b < p->vec->buffers && gate; b++) {
+        gate = metal_rollout_step(p, b, 0, view, &p->env, b * block, block,
+            slot, p->streams[b], p->metal_obs_bt[slot], true);
+    }
+    const char* group_env = getenv("PUF_METAL_ROLLOUT_GROUP");
+    // Two original buffers per dispatch reduce queue/wake round trips while
+    // keeping each buffer's state, RNG and output layout. Clean n=6: Flappy
+    // +5.8/10.0%, Cartpole +8.1/11.6% (BF16/FP32) over ungrouped packing.
+    // Ungated, four buffers increase wake/env overhead; gated, they can win
+    // (metal_dw_policy decides metal_group_pref). =1 restores ungrouped
+    // steps, =2 pairs, =4 four-buffer groups.
+    int group = group_env ? atoi(group_env)
+        : !p->hypers.async ? 1 : gate && p->metal_group_pref == 4 ? 4 : 2;
+    if (!group_env && group == 4 && p->vec->buffers % 4 != 0) group = 2;
+    if ((group == 2 || group == 4) && p->metal_packed_split
+            && p->vec->buffers % group == 0 && PUF_BACKEND != PUF_GPU) {
+        bool eligible = true;
+        for (int b = 0; b < p->vec->buffers && eligible; b++) {
+            eligible = metal_rollout_step(p, b, 0, view, &p->env, b * block, block,
+                slot, p->streams[b], p->metal_obs_bt[slot], true);
+        }
+        if (!eligible) group = 1;
+    } else {
+        group = 1;
+    }
+    __atomic_store_n(&p->metal_rollout_group, group, __ATOMIC_RELAXED);
+    __atomic_store_n(&p->metal_rollout_gate, gate ? 1 : 0, __ATOMIC_RELAXED);
+#endif
     if (p->hypers.reset_every_horizon) {
         for (int b = 0; b < p->num_policies; b++) {
             for (int i = 0; i < p->hypers.num_buffers; i++) {
@@ -2980,7 +3999,17 @@ EvalResult run_eval(Ini* ini, TrainContext* ctx, int mode, int verbose,
         if (p && p->policies) {
             nparams = numel(p->policies[0].master_weights.shape);
         }
-        printf("CUDA_EVAL env=%s score=%.6f perf=%.6f games=%d params=%ld\n",
+#ifndef PUF_EVAL_BACKEND
+#ifdef PUF_METAL
+#define PUF_EVAL_BACKEND METAL
+#else
+#define PUF_EVAL_BACKEND CUDA
+#endif
+#endif
+#define PUF_EVAL_STRINGIFY_INNER(x) #x
+#define PUF_EVAL_STRINGIFY(x) PUF_EVAL_STRINGIFY_INNER(x)
+        printf(PUF_EVAL_STRINGIFY(PUF_EVAL_BACKEND)
+            "_EVAL env=%s score=%.6f perf=%.6f games=%d params=%ld\n",
             puf_ini_get_str(ini, "base", "env_name"),
             r.score, r.perf, r.games, nparams);
         fflush(stdout);
@@ -2988,6 +4017,65 @@ EvalResult run_eval(Ini* ini, TrainContext* ctx, int mode, int verbose,
     close_pufferl(p);
     return r;
 }
+
+#ifdef PUF_METAL
+// Metal runtime counters per train epoch: logged as metal/* (ini metrics) at
+// every log interval and summarized once after the epoch loop
+// ("metal_summary ..." line, parsed by tests/metal/bench.sh).
+typedef struct {
+    puf_mtl::Stats all, train, roll;
+    double wall;
+    double cpu;  // process user + system CPU seconds (getrusage)
+    long epoch, step;
+    double train_ms, rollout_ms;  // profile.accum sums (stamps / events)
+} MetalMark;
+
+static MetalMark metal_mark(PuffeRL* p) {
+    MetalMark m;
+    m.all = puf_mtl::stats();
+    m.train = puf_mtl::stream_stats(p->train_stream);
+    m.roll = p->streams ? puf_mtl::stream_stats(p->streams[0]) : puf_mtl::Stats{};
+    m.wall = wall_clock();
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    m.cpu = ru.ru_utime.tv_sec + ru.ru_stime.tv_sec
+        + (ru.ru_utime.tv_usec + ru.ru_stime.tv_usec) * 1e-6;
+    m.epoch = p->epoch;
+    m.step = p->global_step;
+    m.train_ms = 0;
+    m.rollout_ms = 0;
+    return m;
+}
+
+// Writes per-epoch deltas between marks a and b into out.
+static void metal_log(const MetalMark* a, const MetalMark* b, Dict* out) {
+    double ne = (double)(b->epoch - a->epoch);
+    if (ne <= 0) return;
+    dict_set(out, "metal/dispatches", (b->all.dispatches - a->all.dispatches) / ne);
+    dict_set(out, "metal/commits", (b->all.commits - a->all.commits) / ne);
+    dict_set(out, "metal/cpu_waits", (b->all.host_syncs - a->all.host_syncs) / ne);
+    dict_set(out, "metal/gated_commits", (b->all.gated - a->all.gated) / ne);
+    dict_set(out, "metal/spin_hits", (b->all.spin_hit - a->all.spin_hit) / ne);
+    dict_set(out, "metal/spin_misses", (b->all.spin_miss - a->all.spin_miss) / ne);
+    dict_set(out, "metal/strict_feedback_joins",
+        (b->all.strict_feedback_joins - a->all.strict_feedback_joins) / ne);
+    dict_set(out, "metal/barriers", (b->all.barriers - a->all.barriers) / ne);
+    dict_set(out, "metal/cpu_wait_ms", (b->all.wait_ns - a->all.wait_ns) * 1e-6 / ne);
+    dict_set(out, "metal/encode_ms", (b->all.encode_ns - a->all.encode_ns) * 1e-6 / ne);
+    dict_set(out, "metal/train_dispatches", (b->train.dispatches - a->train.dispatches) / ne);
+    dict_set(out, "metal/train_encode_ms", (b->train.encode_ns - a->train.encode_ns) * 1e-6 / ne);
+    dict_set(out, "metal/train_wait_ms", (b->train.wait_ns - a->train.wait_ns) * 1e-6 / ne);
+    dict_set(out, "metal/train_gpu_ms", (b->train.gpu_ns - a->train.gpu_ns) * 1e-6 / ne);
+    dict_set(out, "metal/rollout_dispatches", (b->roll.dispatches - a->roll.dispatches) / ne);
+    dict_set(out, "metal/rollout_encode_ms", (b->roll.encode_ns - a->roll.encode_ns) * 1e-6 / ne);
+    dict_set(out, "metal/rollout_wait_ms", (b->roll.wait_ns - a->roll.wait_ns) * 1e-6 / ne);
+    dict_set(out, "metal/rollout_gpu_ms", (b->roll.gpu_ns - a->roll.gpu_ns) * 1e-6 / ne);
+    dict_set(out, "metal/epoch_ms", (b->wall - a->wall) * 1e3 / ne);
+    // Average busy CPU cores over the interval (spin / busy-wait cost).
+    double dt = b->wall - a->wall;
+    dict_set(out, "metal/cpu_cores", dt > 0 ? (b->cpu - a->cpu) / dt : 0.0);
+}
+#endif
 
 TrainResult run_train(Ini* ini, TrainContext* ctx) {
     int use_selfplay = puf_ini_get(ini, "selfplay", "enabled");
@@ -3032,6 +4120,21 @@ TrainResult run_train(Ini* ini, TrainContext* ctx) {
     }
 
     PuffeRL* pufferl = create_pufferl(ini, ctx);
+    char warm_start_buf[4096];
+    const char* warm_start = puf_checkpoint_path_key(
+        ini, "load_model_path", warm_start_buf, sizeof(warm_start_buf));
+#ifndef PUF_TEST_SKIP_TRAIN_WARM_START
+    if (warm_start) {
+        pufferl_load_policy(pufferl, 0, warm_start);
+        if (ctx->artifact_owner) {
+            printf("Warm-started policy weights from %s "
+                "(optimizer, step, replay, and RNG state are fresh).\n", warm_start);
+        }
+    }
+#endif
+#ifdef PUF_WARM_START_TEST
+    puf_warm_start_test_dump_state(pufferl);
+#endif
     Selfplay selfplay = {0};
     if (use_selfplay) {
         char initial_checkpoint[4096];
@@ -3066,6 +4169,9 @@ TrainResult run_train(Ini* ini, TrainContext* ctx) {
     long checkpoint_interval = puf_ini_get(ini, "base", "checkpoint_interval");
     char target_key[128];
     sweep_metric_key(ini, target_key, sizeof(target_key));
+    const char* test_schedule = getenv("PUF_TEST_NO_INTERMEDIATE_LOG");
+    bool test_no_intermediate_log = test_schedule
+        && strcmp(test_schedule, "0") != 0;
     Dict last_log = {0};
     // At most one history entry per train epoch (+1 final snapshot for log dump).
     PufLogHistory log_history;
@@ -3073,7 +4179,19 @@ TrainResult run_train(Ini* ini, TrainContext* ctx) {
     TrainResult result = {0};
     char final_checkpoint[4096] = {0};
 
+#ifdef PUF_METAL
+    MetalMark metal_first = {}, metal_prev = {};
+    double metal_train_ms = 0, metal_rollout_ms = 0;
+    double metal_env_ms = 0, metal_model_ms = 0, metal_copy_ms = 0;
+#endif
     for (long epoch = 0; epoch < train_epochs; epoch++) {
+#ifdef PUF_METAL
+        if (epoch == 1) {  // skip epoch 0 (pipeline creation, warmup)
+            metal_first = metal_prev = metal_mark(pufferl);
+            metal_train_ms = metal_rollout_ms = 0;
+            metal_env_ms = metal_model_ms = metal_copy_ms = 0;
+        }
+#endif
         if (pufferl->hypers.async) {
             // Cleanba 2-slot: warmup fills slot 0; then collect into write
             // while training the other slot (exactly one epoch old).
@@ -3097,14 +4215,30 @@ TrainResult run_train(Ini* ini, TrainContext* ctx) {
                 * pufferl->hypers.total_agents;
             RolloutBuf train_src = rollout_time_view(&pufferl->rollouts,
                 ready_slot * pufferl->hypers.horizon, pufferl->hypers.horizon);
+            PUF_TRACE(11, 0, (int)epoch);
+#ifdef PUF_METAL
+            double t_epoch = wall_clock();
+#endif
             train_impl(pufferl, &train_src);
+            PUF_TRACE(13, 0, (int)epoch);
+#ifdef PUF_METAL
+            double t_train = wall_clock();
+#endif
 
             if (prefetch_next) {
                 rollout_finish(pufferl, t0);
+                PUF_TRACE(14, 0, (int)epoch);
                 pufferl->async_ready_slot = 1 - ready_slot;
                 pufferl->async_write_slot = 1 - write_slot;
             }
+#ifdef PUF_METAL
+            double t_done = wall_clock();
+            metal_dw_policy(pufferl, t_done - t_train, t_done - t_epoch);
+#endif
         } else {
+#ifdef PUF_METAL
+            metal_dw_policy(pufferl, 0.0, 1.0);
+#endif
             rollouts(pufferl);
             train_impl(pufferl, NULL);
         }
@@ -3139,8 +4273,13 @@ TrainResult run_train(Ini* ini, TrainContext* ctx) {
             }
         }
 
-        if (last_log.size && wall_clock()
-                < pufferl->last_log_time + 0.6 && epoch < train_epochs - 1) {
+        // Regression-only deterministic schedule: log every epoch until the
+        // objective first appears, then leave the forced final epoch as the
+        // next log. The default 0.6-second production cadence is unchanged.
+        bool throttle_log = test_no_intermediate_log
+            ? last_log.size && dict_find(&last_log, target_key)
+            : last_log.size && wall_clock() < pufferl->last_log_time + 0.6;
+        if (throttle_log && epoch < train_epochs - 1) {
             continue;
         }
 
@@ -3171,6 +4310,26 @@ TrainResult run_train(Ini* ini, TrainContext* ctx) {
 
         log_util(pufferl, &new_log);
 
+#ifdef PUF_METAL
+        if (epoch >= 1) {
+            MetalMark now_mark = metal_mark(pufferl);
+            metal_log(&metal_prev, &now_mark, &new_log);
+            metal_prev = now_mark;
+            // The first log runs at epoch 0, so these sums start at epoch 1.
+            metal_train_ms += pufferl->profile.accum[PROF_TRAIN_MISC]
+                + pufferl->profile.accum[PROF_TRAIN_MODEL];
+            metal_rollout_ms += pufferl->profile.accum[PROF_ROLLOUT];
+            metal_env_ms += pufferl->profile.accum[PROF_ENV];
+            metal_model_ms += pufferl->profile.accum[PROF_MODEL];
+            metal_copy_ms += pufferl->profile.accum[PROF_COPY];
+        } else {
+            // Initialize metal/* at epoch 0 with zero deltas, before there
+            // is a measured interval to report.
+            MetalMark zero = metal_prev;
+            zero.epoch = metal_prev.epoch + 1;
+            metal_log(&metal_prev, &zero, &new_log);
+        }
+#endif
         float train_total = 0;
         for (int i = 0; i < NUM_PROF; i++) {
             float sec = pufferl->profile.accum[i] / 1000.0f;
@@ -3189,27 +4348,39 @@ TrainResult run_train(Ini* ini, TrainContext* ctx) {
             dict_set(&new_log, "pool/num_hist", selfplay.num_hist);
             dict_set(&new_log, "pool/num_policies", pufferl->num_policies);
         }
-        // n=0 logs omit env/*; keep last complete-episode snapshot.
-        int episodes = dict_get(&new_log, "env/n") > 0;
         if (ctx->artifact_owner) {
             puf_dashboard_print(ini, pufferl, &new_log, (int)pufferl->epoch);
         }
         result.cost = dict_get(&new_log, "uptime");
         result.steps = dict_get(&new_log, "agent_steps");
-        if (episodes || !last_log.size) {
-            dict_clear(&last_log);
-            dict_copy(&last_log, &new_log);
-        } else {
-            dict_set(&last_log, "uptime", result.cost);
-            dict_set(&last_log, "agent_steps", result.steps);
-        }
+        puf_log_snapshot_update(&last_log, &new_log);
         // Wait until the objective appears; do not treat negative values as missing.
-        if (episodes && dict_find(&new_log, target_key)) {
+        // The final epoch bypasses the time throttle above, so both the curve
+        // and artifact history include current trainer state even with env/n=0.
+        if (dict_find(&last_log, target_key)) {
             puf_log_history_add(&log_history, &last_log);
         }
         dict_clear(&new_log);
     }
 
+#ifdef PUF_METAL
+    if (ctx->artifact_owner && train_epochs > 1) {
+        MetalMark end_mark = metal_mark(pufferl);
+        Dict sum = {0};
+        metal_log(&metal_first, &end_mark, &sum);
+        double ne = (double)(end_mark.epoch - metal_first.epoch);
+        double sps = (end_mark.step - metal_first.step) / (end_mark.wall - metal_first.wall);
+        printf("metal_summary epochs=%.0f sps=%.0f train_ms=%.4g rollout_ms=%.4g",
+            ne, sps, metal_train_ms / ne, metal_rollout_ms / ne);
+        printf(" rollout_env_ms=%.4g rollout_model_ms=%.4g rollout_copy_ms=%.4g",
+            metal_env_ms / ne, metal_model_ms / ne, metal_copy_ms / ne);
+        for (int i = 0; i < sum.size; i++) {
+            printf(" %s=%.4g", sum.items[i].key + 6, sum.items[i].value);
+        }
+        printf("\n");
+        dict_clear(&sum);
+    }
+#endif
     // TrainResult curve: bin-mean over log_history (same as artifact metrics).
     DictItem* target = dict_find(&last_log, target_key);
     result.score = target ? (float)target->value : 0;
@@ -3220,6 +4391,9 @@ TrainResult run_train(Ini* ini, TrainContext* ctx) {
     result.points = points;
 
     if (log_history.size == 0 || points == 1) {
+        // No observed objective: one explicit fallback, not spurious
+        // additional Protein observations at zero cost/steps.
+        result.points = 1;
         result.scores[0] = result.score;
         result.costs[0] = result.cost;
         result.step_points[0] = result.steps;

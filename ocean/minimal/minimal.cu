@@ -24,6 +24,7 @@ struct MinimalEntityEncoderActivations {
     Int argmax;
 };
 
+#ifndef PUF_METAL
 __global__ void me_materialize_points_kernel(
         precision_t* __restrict__ point_input,
         const precision_t* __restrict__ obs,
@@ -199,6 +200,8 @@ __global__ void me_grad_entity_kernel(
     }
 }
 
+#endif  // PUF_METAL: kernels_envs.h + shaders/envs_entity.metal
+
 static MinimalEntityEncoderWeights* me_encoder_create(int obs_size, int hidden) {
     assert(obs_size == ME_OBS_SIZE && "minimal entity encoder expects the minimal observation layout");
     MinimalEntityEncoderWeights* ew =
@@ -213,7 +216,7 @@ static Prec me_encoder_forward(void* w, void* activations, Prec input, cudaStrea
     MinimalEntityEncoderActivations* a = (MinimalEntityEncoderActivations*)activations;
     int B = input.shape[0];
 
-    me_materialize_points_kernel<<<grid_size(B * ME_NUM_POINTS * ME_ENTITY_IN), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(me_materialize_points_kernel, grid_size(B * ME_NUM_POINTS * ME_ENTITY_IN), BLOCK_SIZE, 0, stream)(
         a->point_input.data, input.data, B, ew->obs_size);
     Prec point_input = {.data = a->point_input.data, .shape = {B, ME_NUM_POINTS, ME_ENTITY_IN}};
     Prec entity_hidden = {.data = a->entity_hidden.data, .shape = {B, ME_NUM_POINTS, ME_ENTITY_HIDDEN}};
@@ -225,7 +228,7 @@ static Prec me_encoder_forward(void* w, void* activations, Prec input, cudaStrea
     size_t shared_bytes = (
         (size_t)ME_BATCH_TILE * ME_NUM_POINTS * ME_ENTITY_HIDDEN +
         (size_t)ME_HIDDEN_TILE * ME_ENTITY_HIDDEN) * sizeof(precision_t);
-    me_linear_max_kernel<<<grid, block, shared_bytes, stream>>>(
+    PUF_LAUNCH(me_linear_max_kernel, grid, block, shared_bytes, stream)(
         a->out.data, a->argmax.data, a->entity_hidden.data,
         ew->output_w.data, B, ew->hidden);
     return a->out;
@@ -236,10 +239,10 @@ static void me_encoder_backward(void* w, void* activations, Prec grad, cudaStrea
     MinimalEntityEncoderActivations* a = (MinimalEntityEncoderActivations*)activations;
     int B = grad.shape[0];
 
-    me_output_wgrad_kernel<<<ew->hidden, 256, 0, stream>>>(
+    PUF_LAUNCH(me_output_wgrad_kernel, ew->hidden, 256, 0, stream)(
         a->output_wgrad.data, grad.data, a->entity_hidden.data, a->argmax.data, B, ew->hidden);
 
-    me_grad_entity_kernel<<<B, BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(me_grad_entity_kernel, B, BLOCK_SIZE, 0, stream)(
         a->grad_entity.data, grad.data, ew->output_w.data,
         a->entity_hidden.data, a->argmax.data, B, ew->hidden);
 
@@ -315,6 +318,7 @@ static void create_minimal_encoder(Encoder* enc) {
     };
 }
 
+#ifndef PUF_METAL
 // Entity-attention encoder. One QKV self-attention layer over N<=64 entities
 // at D=16 (PTX m16n8k16 tiles), mean-pool, then Linear D->H via puf_mm.
 // Pairwise interactions live in the 16x16 MMA; H scaling is a skinny GEMM.
@@ -1041,3 +1045,5 @@ static void create_entity_attn_encoder(Encoder* enc) {
     };
 }
 
+
+#endif  // PUF_METAL: optional PTX attention encoder remains CUDA-only

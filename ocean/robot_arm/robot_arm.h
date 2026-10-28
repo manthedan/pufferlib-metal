@@ -18,9 +18,15 @@ typedef float obs_t;
 #include "raymath.h"
 #undef float3
 
+#ifdef RA_CPU
+#define RA_HD
+#define RA_D
+#define RA_INLINE inline __attribute__((always_inline))
+#else
 #define RA_HD __host__ __device__
 #define RA_D __device__
 #define RA_INLINE __forceinline__
+#endif
 
 #define RA_DOF 7
 #define RA_ACTIONS 8
@@ -1279,11 +1285,30 @@ RA_D static void ra_observe(const RaState* state, float* observation) {
     assert(index == OBS_SIZE);
 }
 
-RA_HD static void ra_resetb(RaState* state) {
+RA_HD static void ra_resetb(RaState* state
+#ifdef RA_CPU
+        , int host_reset = 0
+#endif
+        ) {
+#ifdef RA_CPU
+    // Upstream's argument order is unspecified: GCC host initialization draws
+    // z then x, whereas nvcc device episode/ball resets draw x then z.
+    // Preserve both observed orders explicitly, without changing CUDA code.
+    float ball_x, ball_z;
+    if (host_reset) {
+        ball_z = ra_rand(&state->rng, 0.20f, 0.32f);
+        ball_x = ra_rand(&state->rng, 0.42f, 0.54f);
+    } else {
+        ball_x = ra_rand(&state->rng, 0.42f, 0.54f);
+        ball_z = ra_rand(&state->rng, 0.20f, 0.32f);
+    }
+    state->cube_position = ra_v3(ball_x, RA_TABLE_TOP + RA_BALL_RADIUS, ball_z);
+#else
     state->cube_position = ra_v3(
         ra_rand(&state->rng, 0.42f, 0.54f),
         RA_TABLE_TOP + RA_BALL_RADIUS,
         ra_rand(&state->rng, 0.20f, 0.32f));
+#endif
     state->cube_velocity = ra_v3(0, 0, 0);
     state->cube_rotation = ra_quat(0, 0, 0, 1);
     state->cube_angular_velocity = ra_v3(0, 0, 0);
@@ -1324,7 +1349,11 @@ RA_HD static void ra_resetb(RaState* state) {
         + 0.65f*trajectory_quality;
 }
 
-RA_HD static void ra_reset(RaState* state) {
+RA_HD static void ra_reset(RaState* state
+#ifdef RA_CPU
+        , int host_reset = 0
+#endif
+        ) {
     uint32_t rng = state->rng ? state->rng : 1u;
     int no_timeout = state->no_timeout;
     int stack_mode = state->stack_mode;
@@ -1347,7 +1376,11 @@ RA_HD static void ra_reset(RaState* state) {
         &state->end_effector);
 
     if (state->basketball_mode) {
+#ifdef RA_CPU
+        ra_resetb(state, host_reset);
+#else
         ra_resetb(state);
+#endif
         return;
     }
 

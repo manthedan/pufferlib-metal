@@ -39,6 +39,13 @@ struct EncoderWeights {
 
 struct EncoderActivations {
     Prec out, saved_input, wgrad_scratch;
+#ifdef PUF_METAL
+    // Train only, set by arch_reg_train for the standard encoder: saved_input
+    // is a view of the forward input instead of a copy. arch_forward_train
+    // passes the minibatch slice of train_rollouts, which is not rewritten
+    // until the next train epoch's transpose on the same stream.
+    bool save_view;
+#endif
 };
 
 struct Decoder {
@@ -62,6 +69,11 @@ struct DecoderWeights {
 
 struct DecoderActivations {
     Prec out, grad_out, saved_input, grad_input, wgrad_scratch, logstd_scratch;
+#ifdef PUF_METAL
+    // Train only, set by arch_reg_train for the MinGRU network: the decoder
+    // input is the last scan output, immutable until the dW join.
+    bool save_view;
+#endif
 };
 
 struct Network {
@@ -77,6 +89,14 @@ struct Network {
 };
 
 // Side-stream dW (mm_tn) overlaps dX (mm_nn) on main during linear bwd.
+#ifdef PUF_METAL
+// Decoder dW placement (decoder_backward): side stream if true, else the
+// caller's stream. Set between epochs by pufferl.cu metal_dw_policy.
+static bool g_metal_dw_side = false;
+// Backward dW overlap (BwdOverlap below) for the next epoch: on while the
+// learner is the critical path. Set between epochs by metal_dw_policy.
+static bool g_metal_bwd_overlap = true;
+#endif
 thread_local cudaEvent_t g_main_ready = NULL;
 thread_local cudaStream_t g_dw_stream = NULL;
 thread_local cudaEvent_t g_dw_done = NULL;
@@ -88,13 +108,14 @@ struct CublasStream {
     void* workspace;
 };
 constexpr int CUBLAS_MAX_STREAMS = 8;
+constexpr size_t kCublasWsBytes = 4 * 1024 * 1024;
 thread_local CublasStream g_cublas_streams[CUBLAS_MAX_STREAMS];
 thread_local int g_num_cublas_streams = 0;
 
 // Initialize on the calling thread before capturing any GEMMs on this stream.
 void cublas_init_stream(cudaStream_t stream) {
     assert(g_num_cublas_streams < CUBLAS_MAX_STREAMS);
-    const size_t ws_bytes = 4 * 1024 * 1024;
+    const size_t ws_bytes = kCublasWsBytes;
     CublasStream* cs = &g_cublas_streams[g_num_cublas_streams++];
     cs->stream = stream;
     cublasCreate(&cs->handle);
@@ -176,6 +197,124 @@ void puf_dw_join(cudaStream_t consumer) {
     cudaStreamWaitEvent(consumer, g_dw_done, 0);
 }
 
+#ifdef PUF_METAL
+#include <functional>
+#include <vector>
+
+// Backward weight-gradient overlap (PUF_METAL_BWD_OVERLAP=0 disables). The
+// standard backward on one stream is a dependency chain (decoder dX, layer
+// backwards, encoder) plus weight-gradient GEMMs nothing in the chain reads.
+// Each chain kernel runs in a concurrent window (puf_mtl::concurrent_begin)
+// together with the dW split-K slices whose inputs the previous window
+// produced and the split-K reductions of the window before that. The same
+// GEMMs, split counts and reduction kernels run on the same inputs, so every
+// weight gradient is bit-identical; only the barriers between independent
+// dispatches go away. Partials of the pending reductions sit side by side in
+// the stream's cuBLAS workspace (bump allocated, reset when drained), and
+// split counts still follow the full workspace size.
+struct BwdOverlap {
+    bool active = false;
+    bool open = false;
+    cudaStream_t stream = NULL;
+    void* ws = nullptr;
+    size_t ws_bytes = 0, ws_off = 0;
+    std::vector<Prec> queued;  // (a, b, out) triples: inputs written by the open window
+    std::vector<std::function<void()>> fresh;  // reductions of splits in the open window
+    std::vector<std::function<void()>> ready;  // reductions of splits in closed windows
+};
+thread_local BwdOverlap g_ov;
+
+// PUF_METAL_BWD_OVERLAP=0 / 1 pins it off / on; unset follows
+// g_metal_bwd_overlap (pufferl.cu metal_dw_policy).
+static bool bwd_overlap_env() {
+    static const int pinned = [] {
+        const char* e = getenv("PUF_METAL_BWD_OVERLAP");
+        return !e ? -1 : strcmp(e, "0") != 0;
+    }();
+    return pinned >= 0 ? pinned == 1 : g_metal_bwd_overlap;
+}
+
+// Deferred puf_mm_tn(a, b, out, g_ov.stream): the same gemm_rm call the
+// cuBLAS shim makes, with its reduction (if split) left in g_ov.fresh.
+static void ov_split(Prec a, Prec b, Prec out) {
+    int M = a.shape[ndim(a.shape)-1];
+    int K = batch_size(a.shape) * a.shape[ndim(a.shape)-2];
+    int N = b.shape[ndim(b.shape)-1];
+    for (int attempt = 0; ; attempt++) {
+        puf_mtl::GemmDeferred d;
+        puf_mtl::GemmPath path = puf_mtl::gemm_rm_deferred(g_ov.stream, true, false, M, N, K,
+            1.0f, a.data, M, b.data, N, 0.0f, out.data, N,
+            g_ov.ws, g_ov.ws_bytes, g_ov.ws_off, &d);
+        if (path != puf_mtl::GEMM_NONE) {
+            if (d.pipe) {
+                g_ov.ws_off += (d.ws_used + 255) & ~(size_t)255;
+                g_ov.fresh.push_back([d]() mutable { puf_mtl::gemm_finish(g_ov.stream, &d); });
+            }
+            return;
+        }
+        // Partials do not fit beside the pending ones: close the window,
+        // run every pending reduction, restart the workspace and reopen.
+        if (attempt > 0 || g_ov.ws_off == 0) puf_mtl::fatal("bwd overlap: dW partials do not fit");
+        puf_mtl::concurrent_end(g_ov.stream);
+        for (auto& f : g_ov.ready) f();
+        for (auto& f : g_ov.fresh) f();
+        g_ov.ready.clear();
+        g_ov.fresh.clear();
+        g_ov.ws_off = 0;
+        puf_mtl::concurrent_begin(g_ov.stream);
+    }
+}
+
+// Opens a window: runs the reductions of closed windows and the queued splits.
+static void ov_window_begin() {
+    puf_mtl::concurrent_begin(g_ov.stream);
+    g_ov.open = true;
+    for (auto& f : g_ov.ready) f();
+    g_ov.ready.clear();
+    std::vector<Prec> q;
+    q.swap(g_ov.queued);
+    for (size_t i = 0; i + 2 < q.size(); i += 3) ov_split(q[i], q[i + 1], q[i + 2]);
+}
+
+static void ov_window_end() {
+    puf_mtl::concurrent_end(g_ov.stream);
+    g_ov.open = false;
+    for (auto& f : g_ov.fresh) g_ov.ready.push_back(std::move(f));
+    g_ov.fresh.clear();
+}
+
+// puf_mm_tn(a, b, out) once the open window (or, outside one, the next) is done.
+static void ov_queue_dw(const Prec& a, const Prec& b, const Prec& out) {
+    g_ov.queued.push_back(a);
+    g_ov.queued.push_back(b);
+    g_ov.queued.push_back(out);
+}
+
+// Runs everything pending; afterwards the stream is back to plain ordering.
+static void ov_drain() {
+    if (!g_ov.active) return;
+    if (g_ov.open) ov_window_end();
+    while (!g_ov.queued.empty() || !g_ov.ready.empty()) {
+        ov_window_begin();
+        ov_window_end();
+    }
+    g_ov.ws_off = 0;
+    g_ov.active = false;
+}
+
+static void ov_start(cudaStream_t stream) {
+    int i = 0;
+    while (i < g_num_cublas_streams && g_cublas_streams[i].stream != stream) i++;
+    if (i == g_num_cublas_streams) return;
+    g_ov = BwdOverlap();
+    g_ov.active = true;
+    g_ov.stream = stream;
+    g_ov.ws = g_cublas_streams[i].workspace;
+    g_ov.ws_bytes = kCublasWsBytes;
+}
+#endif
+
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 // Weight init (needs cast, grid_size, numel/ndim from pufferl substrate).
 __global__ void uniform_scale_kernel(float* data, float bound, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -183,6 +322,7 @@ __global__ void uniform_scale_kernel(float* data, float bound, int n) {
         data[idx] = data[idx] * 2.0f * bound - bound;
     }
 }
+#endif  // PUF_METAL
 
 // Uniform(-1/sqrt(fan_in), 1/sqrt(fan_in))
 void puf_kaiming_init(Prec* dst,
@@ -199,11 +339,12 @@ void puf_kaiming_init(Prec* dst,
     curandSetPseudoRandomGeneratorSeed(gen, seed);
     curandGenerateUniform(gen, buf, n);
     curandDestroyGenerator(gen);
-    uniform_scale_kernel<<<grid_size(n), BLOCK_SIZE, 0, stream>>>(buf, bound, n);
-    cast<<<grid_size(n), BLOCK_SIZE, 0, stream>>>(dst->data, buf, n);
+    PUF_LAUNCH(uniform_scale_kernel, grid_size(n), BLOCK_SIZE, 0, stream)(buf, bound, n);
+    PUF_LAUNCH(cast, grid_size(n), BLOCK_SIZE, 0, stream)(dst->data, buf, n);
     cudaFree(buf);
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 __device__ __forceinline__ float sigmoid(float x) {
     float z = expf(-fabsf(x));
     return x >= 0.0f ? 1.0f / (1.0f + z) : z / (1.0f + z);
@@ -242,6 +383,7 @@ __global__ void mingru_gate(precision_t* out, precision_t* next_state,
     float s = sigmoid(proj);
     out[idx] = from_float(s * h_out + (1.0f - s) * x);
 }
+#endif  // PUF_METAL
 
 // Train scan buffers. Cache post-reset h inputs; recompute outputs in bwd.
 struct PrefixScan {
@@ -256,6 +398,7 @@ struct PrefixScan {
     Prec grad_input;
 };
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 // Train scan: match rollout's precision_t recurrent state between steps.
 __global__ void mingru_scan_forward(PrefixScan scan) {
     int T_seq = scan.T, H = scan.H, B = scan.B;
@@ -413,11 +556,13 @@ __global__ void mingru_scan_backward(PrefixScan scan,
 
     grad_state[state_idx] = from_float(dh);
 }
+#endif  // PUF_METAL
 
 // Coalesced T-tile load + sequential apply. 32 h-threads apply after the load.
 // Use when T is long and seq occupancy B*H is not already huge.
 #define MINGRU_TILE 32
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 __global__ void mingru_scan_forward_row(PrefixScan scan) {
     int T_seq = scan.T, H = scan.H;
     int hx = threadIdx.x, t_local = threadIdx.y;
@@ -571,11 +716,17 @@ __global__ void assemble_decoder_grad(
     int row = idx / od_plus_1, col = idx % od_plus_1;
     dst[idx] = from_float((col < od) ? grad_logits[row * od + col] : grad_value[row]);
 }
+#endif  // PUF_METAL
 
 Prec encoder_forward(void* w, void* activations, Prec input, cudaStream_t stream) {
     EncoderWeights* ew = (EncoderWeights*)w;
     EncoderActivations* a = (EncoderActivations*)activations;
     // Train acts register saved_input; rollout acts leave it null.
+#ifdef PUF_METAL
+    if (a->save_view) {
+        a->saved_input = input;
+    } else
+#endif
     if (a->saved_input.data) {
         puf_copy(&a->saved_input, &input, stream);
     }
@@ -585,6 +736,14 @@ Prec encoder_forward(void* w, void* activations, Prec input, cudaStream_t stream
 
 void encoder_backward(void* w, void* activations, Prec grad, cudaStream_t stream) {
     EncoderActivations* a = (EncoderActivations*)activations;
+#ifdef PUF_METAL
+    // Backward overlap: beside the last layer's dW and pending reductions.
+    if (g_ov.active && g_ov.stream == stream) {
+        ov_queue_dw(grad, a->saved_input, a->wgrad_scratch);
+        ov_drain();
+        return;
+    }
+#endif
     // Last layer before join: nothing left on main to overlap, so sync dW.
     puf_mm_tn(&grad, &a->saved_input, &a->wgrad_scratch, stream);
 }
@@ -608,12 +767,21 @@ void encoder_reg_train(void* w, void* activations,
         Allocator* acts, Allocator* grads, int B_TT) {
     EncoderWeights* ew = (EncoderWeights*)w;
     EncoderActivations* a = (EncoderActivations*)activations;
+#ifdef PUF_METAL
+    bool save_view = a->save_view;
+#endif
     *a = (EncoderActivations){
         .out =              {.shape = {B_TT, ew->out_dim}},
         .saved_input =      {.shape = {B_TT, ew->in_dim}},
         .wgrad_scratch =    {.shape = {ew->out_dim, ew->in_dim}},
+#ifdef PUF_METAL
+        .save_view = save_view,
+#endif
     };
     alloc_register(acts, &a->out);
+#ifdef PUF_METAL
+    if (!a->save_view)
+#endif
     alloc_register(acts, &a->saved_input);
     alloc_register(grads, &a->wgrad_scratch);
 }
@@ -635,6 +803,11 @@ void* encoder_create_weights(void* self) {
 Prec decoder_forward(void* w, void* activations, Prec input, cudaStream_t stream) {
     DecoderWeights* dw = (DecoderWeights*)w;
     DecoderActivations* a = (DecoderActivations*)activations;
+#ifdef PUF_METAL
+    if (a->save_view) {
+        a->saved_input = input;
+    } else
+#endif
     if (a->saved_input.data) {
         puf_copy(&a->saved_input, &input, stream);
     }
@@ -666,6 +839,9 @@ void decoder_reg_train(void* w, void* activations,
     DecoderWeights* dw = (DecoderWeights*)w;
     DecoderActivations* a = (DecoderActivations*)activations;
     int od1 = dw->output_dim + 1;
+#ifdef PUF_METAL
+    bool save_view = a->save_view;
+#endif
     *a = (DecoderActivations){
         .out =              {.shape = {B_TT, od1}},
         .grad_out =         {.shape = {B_TT, od1}},
@@ -673,8 +849,16 @@ void decoder_reg_train(void* w, void* activations,
         .grad_input =       {.shape = {B_TT, dw->hidden_dim}},
         .wgrad_scratch =    {.shape = {od1, dw->hidden_dim}},
         .logstd_scratch =   {.shape = {1, dw->output_dim}},
+#ifdef PUF_METAL
+        .save_view = save_view,
+#endif
     };
     alloc_register(acts, &a->out);
+#ifdef PUF_METAL
+    // arch_reg_train sets save_view before this call when the input is a
+    // MinGRU scan output; otherwise keep the private copy.
+    if (!a->save_view)
+#endif
     alloc_register(acts, &a->saved_input);
     alloc_register(acts, &a->grad_out);
     alloc_register(acts, &a->grad_input);
@@ -706,15 +890,30 @@ Prec decoder_backward(void* w, void* activations, Float grad_logits,
     DecoderActivations* a = (DecoderActivations*)activations;
     int B_TT = a->saved_input.shape[0];
     int od = dw->output_dim, od1 = od + 1;
-    assemble_decoder_grad<<<grid_size(B_TT * od1), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(assemble_decoder_grad, grid_size(B_TT * od1), BLOCK_SIZE, 0, stream)(
         a->grad_out.data, grad_logits.data, grad_value.data, B_TT, od, od1);
     // dW // dX: weight grad on side stream, dX on main (needed for residual chain).
+#ifdef PUF_METAL
+    // Metal: on main unless the training loop's policy picks the side
+    // stream (pufferl.cu metal_dw_policy). Same GEMM and inputs either way:
+    // bit-identical.
+    // With the backward overlap, dW (split slices) runs concurrently with dX.
+    const bool ov = g_ov.active && !g_metal_dw_side;
+    if (ov) {
+        ov_queue_dw(a->grad_out, a->saved_input, a->wgrad_scratch);
+        ov_window_begin();
+    } else if (!g_metal_dw_side) puf_mm_tn(&a->grad_out, &a->saved_input, &a->wgrad_scratch, stream);
+    else
+#endif
     puf_mm_tn_async_after(&a->grad_out, &a->saved_input, &a->wgrad_scratch, stream);
     if (dw->continuous && grad_logstd.data != NULL) {
-        sum_rows_to_precision_kernel<<<grid_size(dw->output_dim), BLOCK_SIZE, 0, stream>>>(
+        PUF_LAUNCH(sum_rows_to_precision_kernel, grid_size(dw->output_dim), BLOCK_SIZE, 0, stream)(
             a->logstd_scratch.data, grad_logstd.data, B_TT, dw->output_dim);
     }
     puf_mm_nn(&a->grad_out, &dw->weight, &a->grad_input, stream);
+#ifdef PUF_METAL
+    if (ov) ov_window_end();
+#endif
     return a->grad_input;
 }
 
@@ -730,6 +929,17 @@ struct MinGRUActivations {
     Prec* wgrad_scratch;  // (3*T, T)[num_layers]
     Prec grad_input_buf;  // (B*TT, T)
     Prec grad_next_state; // (B, 1, T)
+#ifdef PUF_METAL
+    bool alias_encoder_output;  // only the standard encoder guarantees its lifetime
+    // Layers i > 0 save a view of the previous scan output. Only with the
+    // standard forward/backward/registration, which never write scan.out
+    // before the dW join; custom networks keep private copies.
+    bool alias_layer_inputs;
+    // fused[i]: layer i's forward ran puf_mtl::mingru_fused_forward_rm, so
+    // (H=32) combined_bufs[i] was never written and the backward must
+    // recompute it; (H=64) the fused backward reads combined_bufs[i].
+    bool* fused;
+#endif
 };
 
 struct MinGRUWeights {
@@ -777,6 +987,9 @@ void mingru_reg_train(void* w, void* activations,
     a->grad_next_state = {.shape = {B, 1, H}};
     alloc_register(acts, &a->grad_input_buf);
     alloc_register(acts, &a->grad_next_state);
+#ifdef PUF_METAL
+    a->fused = (bool*)calloc(m->num_layers, sizeof(bool));
+#endif
     for (int i = 0; i < m->num_layers; i++) {
         a->scan_bufs[i] = {
             .B = B, .T = TT, .H = H,
@@ -790,7 +1003,13 @@ void mingru_reg_train(void* w, void* activations,
         a->saved_inputs[i]  = {.shape = {B, TT, H}};
         a->combined_bufs[i] = {.shape = {B_TT, 3 * H}};
         a->wgrad_scratch[i] = {.shape = {3 * H, H}};
+#ifdef PUF_METAL
+        if (!(i == 0 ? a->alias_encoder_output : a->alias_layer_inputs)) {
+            alloc_register(acts, &a->saved_inputs[i]);
+        }
+#else
         alloc_register(acts, &a->saved_inputs[i]);
+#endif
         alloc_register(acts, &a->combined_bufs[i]);
         alloc_register(acts, &a->scan_bufs[i].out);
         alloc_register(acts, &a->scan_bufs[i].next_state);
@@ -837,7 +1056,7 @@ Prec mingru_forward(void* w, Prec x, Prec state,
     for (int i = 0; i < m->num_layers; i++) {
         Prec state_i = mingru_state_layer(state, i, 0, B);
         puf_mm(&x, &m->weights[i], &a->combined[i], stream);
-        mingru_gate<<<grid_size(B*H), BLOCK_SIZE, 0, stream>>>(
+        PUF_LAUNCH(mingru_gate, grid_size(B*H), BLOCK_SIZE, 0, stream)(
             a->out.data, a->next_state.data,
             a->combined[i].data, state_i.data, x.data, H, B);
         puf_copy(&state_i, &a->next_state, stream);
@@ -852,27 +1071,65 @@ Prec mingru_forward_train(void* w, Prec x, Prec state, Prec terminals,
     MinGRUActivations* a = (MinGRUActivations*)activations;
     int B = (int)x.shape[0];
     for (int i = 0; i < m->num_layers; i++) {
+#ifdef PUF_METAL
+        // With the standard backward, each preceding scan owns immutable
+        // output until the dW stream joins; custom networks keep copies.
+        // The standard encoder also preserves its output through backward;
+        // custom encoders keep their first-layer copy for scratch reuse.
+        if (i == 0 ? a->alias_encoder_output : a->alias_layer_inputs) a->saved_inputs[i] = x;
+        else puf_copy(&a->saved_inputs[i], &x, stream);
+#else
         puf_copy(&a->saved_inputs[i], &x, stream);
+#endif
         Prec state_i = mingru_state_layer(state, i, agent_off, B);
-        puf_mm(&x, &m->weights[i], &a->combined_bufs[i], stream);
         PrefixScan& scan = a->scan_bufs[i];
         scan.combined_ptr = a->combined_bufs[i].data;
         scan.state_ptr = state_i.data;
         scan.input_ptr = a->saved_inputs[i].data;
         scan.terminals_ptr = terminals.data;
+#ifdef PUF_METAL
+        // GEMM + scan in one kernel; at H=32 the projection never leaves
+        // threadgroup memory. saved_inputs[i] holds x (view or copy), so the
+        // backward recomputes the same projection from the same pointer.
+        // H>=64 (compute-bound projection) also stores it to combined_bufs[i]
+        // for the backward instead.
+        a->fused[i] = ndim(x.shape) == 3 && x.shape[0] == scan.B && x.shape[1] == scan.T
+            && x.shape[2] == scan.H && m->weights[i].shape[0] == 3 * scan.H
+            && m->weights[i].shape[1] == scan.H
+            // The fused backward's dX epilogue writes grad_input_buf (C) and
+            // reads scan.grad_input (D): it must be able to run too.
+            && numel(a->grad_input_buf.shape) == (int64_t)scan.B * scan.T * scan.H
+            && a->grad_input_buf.data != scan.grad_input.data
+            && ((uintptr_t)a->grad_input_buf.data & 15) == 0
+            && ((uintptr_t)scan.grad_input.data & 15) == 0
+#ifndef PRECISION_FLOAT
+            // The fused dW reuses this BF16 allocation as FP32 tensor scratch.
+            && ((uintptr_t)scan.grad_combined.data & 15) == 0
+#endif
+            && puf_mtl::mingru_fused_forward_rm(stream, scan.B, scan.T, scan.H,
+                scan.input_ptr, m->weights[i].data, scan.state_ptr, scan.terminals_ptr,
+                scan.scan_h.data, scan.out.data, scan.next_state.data,
+                a->combined_bufs[i].data);
+        if (a->fused[i]) {
+            x = scan.out;
+            continue;
+        }
+#endif
+        puf_mm(&x, &m->weights[i], &a->combined_bufs[i], stream);
         if (scan.T >= 256 && scan.B * scan.H <= 32768
                 || scan.T >= 128 && scan.H <= 32) {
             dim3 block(MINGRU_TILE, MINGRU_TILE);
             dim3 grid(scan.B, (scan.H + MINGRU_TILE - 1) / MINGRU_TILE);
-            mingru_scan_forward_row<<<grid, block, 0, stream>>>(scan);
+            PUF_LAUNCH(mingru_scan_forward_row, grid, block, 0, stream)(scan);
         } else {
-            mingru_scan_forward<<<grid_size(scan.B * scan.H), BLOCK_SIZE, 0, stream>>>(scan);
+            PUF_LAUNCH(mingru_scan_forward, grid_size(scan.B * scan.H), BLOCK_SIZE, 0, stream)(scan);
         }
         x = scan.out;
     }
     return x;
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 __global__ void add_kernel(precision_t* __restrict__ dst,
         const precision_t* __restrict__ src, int n) {
     for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n;
@@ -880,28 +1137,129 @@ __global__ void add_kernel(precision_t* __restrict__ dst,
         dst[idx] = from_float(to_float(dst[idx]) + to_float(src[idx]));
     }
 }
+#endif  // PUF_METAL
 
 Prec mingru_backward(void* w, Prec grad, void* activations, cudaStream_t stream) {
     MinGRUWeights* m = (MinGRUWeights*)w;
     MinGRUActivations* a = (MinGRUActivations*)activations;
     for (int i = m->num_layers - 1; i >= 0; i--) {
         PrefixScan& scan = a->scan_bufs[i];
+#ifdef PUF_METAL
+        if (a->fused[i]) {
+            // Recomputes the projection, runs the reverse scan and the dX GEMM
+            // with the highway gradient (tensor_ops_gemm_nn_add_f32's exact
+            // configuration) from the threadgroup grad_combined tile. Each
+            // threadgroup reads grad_out for its own 64 rows before writing
+            // grad_x to them, so grad_out may be grad_input_buf (in place).
+            static const bool fused_dw_env = [] {
+                const char* e = getenv("PUF_METAL_FUSED_DW");
+                return !e || strcmp(e, "0") != 0;
+            }();
+            // H>=64 has no fused dW: its backward writes grad_combined for the
+            // generic dW GEMM below (same GEMM, stream and order as unfused).
+            const bool fused_dw = fused_dw_env && scan.H == 32;
+            static const bool dw_side = [] {
+                const char* e = getenv("PUF_METAL_DW_SIDE");
+                return e && strcmp(e, "0") != 0;
+            }();
+            // BF16's generic dW stays on main, as in the unfused path.
+            // Keep this exact-reduction fallback free of side-stream
+            // command-slot backpressure (PUF_METAL_DW_SIDE restores it).
+            // FP32 H=32 keeps its side-stream fallback; FP32 H=64 runs
+            // where the unfused path runs it (main).
+#ifdef PRECISION_FLOAT
+            const bool on_main = !dw_side && scan.H != 32;
+#else
+            const bool on_main = !dw_side;
+#endif
+            // Backward overlap (g_ov): this layer's dW reduction (fused) or
+            // GEMM runs in the next layer's window. A side-stream layer ends it.
+            if (g_ov.active && !fused_dw && !on_main) ov_drain();
+            const bool ov = g_ov.active;
+            if (ov) ov_window_begin();
+            if (numel(a->grad_input_buf.shape) != (int64_t)scan.B * scan.T * scan.H
+                    || !puf_mtl::mingru_fused_backward_rm(stream, scan.B, scan.T, scan.H,
+                    scan.input_ptr, m->weights[i].data, scan.terminals_ptr, scan.scan_h.data,
+                    grad.data, a->grad_next_state.data, scan.grad_combined.data,
+                    scan.grad_state.data,
+                    // H>=64 keeps grad_input on chip; nothing reads it after.
+                    scan.H >= 64 ? nullptr : scan.grad_input.data, a->grad_input_buf.data,
+                    fused_dw ? a->wgrad_scratch[i].data : nullptr, a->combined_bufs[i].data,
+                    ov && fused_dw)) {
+                puf_mtl::fatal("mingru_backward: fused forward without an eligible fused backward");
+            }
+            if (ov) {
+                if (fused_dw) {
+                    const float* partial = (const float*)scan.grad_combined.data;
+                    auto out = a->wgrad_scratch[i].data;
+                    int tiles = scan.B * scan.T / 64;
+                    g_ov.fresh.push_back([partial, out, tiles] {
+                        puf_mtl::mingru_dw_reduce_rm(g_ov.stream, partial, out, tiles);
+                    });
+                } else {
+                    ov_queue_dw(scan.grad_combined, a->saved_inputs[i], a->wgrad_scratch[i]);
+                }
+                ov_window_end();
+            } else if (!fused_dw) {
+                // The fused path writes dW before continuing; the fallback
+                // queues the original materialized gradient GEMM.
+                if (on_main) puf_mm_tn(&scan.grad_combined, &a->saved_inputs[i],
+                    &a->wgrad_scratch[i], stream);
+                else
+                puf_mm_tn_async_after(&scan.grad_combined, &a->saved_inputs[i],
+                    &a->wgrad_scratch[i], stream);
+            }
+            grad = a->grad_input_buf;
+            continue;
+        }
+#endif
         if (scan.T >= 256 && scan.B * scan.H <= 32768
                 || scan.T >= 128 && scan.H <= 32) {
             dim3 block(MINGRU_TILE, MINGRU_TILE);
             dim3 grid(scan.B, (scan.H + MINGRU_TILE - 1) / MINGRU_TILE);
-            mingru_scan_backward_row<<<grid, block, 0, stream>>>(
+            PUF_LAUNCH(mingru_scan_backward_row, grid, block, 0, stream)(
                 scan, grad.data, a->grad_next_state.data);
         } else {
-            mingru_scan_backward<<<grid_size(scan.B * scan.H), BLOCK_SIZE, 0,
-                stream>>>(scan, grad.data, a->grad_next_state.data);
+            PUF_LAUNCH(mingru_scan_backward, grid_size(scan.B * scan.H), BLOCK_SIZE, 0,
+                stream)(scan, grad.data, a->grad_next_state.data);
         }
         // dW on side stream (per-layer scratch); dX on main continues the bwd chain.
+#ifdef PUF_METAL
+        // Metal: on the main stream. Each side-stream handoff costs a commit
+        // on both streams; with four layers the train stream then outruns its
+        // command-buffer slots and encoding blocks on the GPU (bf16 Breakout:
+        // ~25 ms/epoch of train_encode_ms). Same GEMM and inputs, so the
+        // gradient is bit-identical. PUF_METAL_DW_SIDE=1 restores the side
+        // stream.
+        static const bool dw_side = [] {
+            const char* e = getenv("PUF_METAL_DW_SIDE");
+            return e && strcmp(e, "0") != 0;
+        }();
+        if (!dw_side) puf_mm_tn(&scan.grad_combined, &a->saved_inputs[i], &a->wgrad_scratch[i], stream);
+        else
+#endif
         puf_mm_tn_async_after(&scan.grad_combined, &a->saved_inputs[i],
             &a->wgrad_scratch[i], stream);
+#ifdef PUF_METAL
+        // dX GEMM with the highway gradient added in its epilogue: one pass
+        // over grad_input_buf instead of GEMM store + add_kernel (bit-identical).
+        {
+            int M = batch_size(scan.grad_combined.shape)
+                * scan.grad_combined.shape[ndim(scan.grad_combined.shape) - 2];
+            int K = scan.grad_combined.shape[ndim(scan.grad_combined.shape) - 1];
+            int N = m->weights[i].shape[ndim(m->weights[i].shape) - 1];
+            if (numel(scan.grad_input.shape) == (int64_t)M * N
+                    && numel(a->grad_input_buf.shape) == (int64_t)M * N
+                    && puf_mtl::gemm_nn_add_rm(stream, M, N, K, scan.grad_combined.data,
+                        m->weights[i].data, scan.grad_input.data, a->grad_input_buf.data)) {
+                grad = a->grad_input_buf;
+                continue;
+            }
+        }
+#endif
         puf_mm_nn(&scan.grad_combined, &m->weights[i], &a->grad_input_buf, stream);
         int n = numel(scan.grad_input.shape);
-        add_kernel<<<grid_size(n), BLOCK_SIZE, 0, stream>>>(
+        PUF_LAUNCH(add_kernel, grid_size(n), BLOCK_SIZE, 0, stream)(
             a->grad_input_buf.data, scan.grad_input.data, n);
         grad = a->grad_input_buf;
     }
@@ -926,8 +1284,64 @@ struct Weights {
     void* network;
 };
 
+#ifdef PUF_METAL
+// Return an empty tensor when the standard fused rollout is ineligible.
+// With args_only, fill *args_only instead of dispatching (pufferl.cu's
+// single-dispatch rollout step wraps the same forward).
+Prec arch_try_fused_rollout(Arch* p, Weights& w, Activations& activations,
+        Prec obs, Prec state, cudaStream_t stream, const float* terminals = nullptr,
+        precision_t* initial_state = nullptr, int initial_agents = 0,
+        puf_mtl::FusedRolloutArgs* args_only = nullptr) {
+    // Only the standard dense architecture with rollout activations is
+    // eligible. Custom encoders/decoders and other shapes keep the generic path.
+    static const bool fused = [] {
+        const char* e = getenv("PUF_METAL_FUSED_ROLLOUT");
+        return !e || strcmp(e, "0") != 0;
+    }();
+    if (fused && p->encoder.forward == encoder_forward && p->network.forward == mingru_forward
+            && p->decoder.forward == decoder_forward) {
+        auto* ew = (EncoderWeights*)w.encoder;
+        auto* mw = (MinGRUWeights*)w.network;
+        auto* dw = (DecoderWeights*)w.decoder;
+        auto* ea = (EncoderActivations*)activations.encoder;
+        auto* da = (DecoderActivations*)activations.decoder;
+        int B = obs.shape[0], H = mw->hidden;
+        // Only H=32 has a measured throughput win as a forward alone. H=64
+        // is offered only to the single-dispatch rollout step (args_only;
+        // pufferl.cu metal_rollout_step decides). H=128 regresses under
+        // learner contention, so other hidden sizes keep the generic path.
+        if ((H == 32 || (H == 64 && args_only)) && !ea->saved_input.data && !da->saved_input.data
+                && state.shape[0] == mw->num_layers && state.shape[1] == B && state.shape[2] == H
+                && obs.shape[1] == ew->in_dim && ew->out_dim == H && dw->hidden_dim == H
+                && da->out.shape[0] == B && da->out.shape[1] == dw->output_dim + 1
+                && puf_mtl::fused_rollout_supported(B, ew->in_dim, H, mw->num_layers, dw->output_dim + 1)) {
+            puf_mtl::FusedRolloutArgs a = {};
+            a.obs = puf_mtl::gpu_addr(obs.data);
+            a.encoder = puf_mtl::gpu_addr(ew->weight.data);
+            for (int l = 0; l < mw->num_layers; l++) a.recurrent[l] = puf_mtl::gpu_addr(mw->weights[l].data);
+            a.decoder = puf_mtl::gpu_addr(dw->weight.data);
+            a.state = puf_mtl::gpu_addr(state.data);
+            a.out = puf_mtl::gpu_addr(da->out.data);
+            a.terminals = terminals ? puf_mtl::gpu_addr(terminals) : 0;
+            a.initial_state = initial_state ? puf_mtl::gpu_addr(initial_state) : 0;
+            a.initial_agents = initial_agents;
+            a.B = B; a.input_dim = ew->in_dim; a.hidden = H;
+            a.layers = mw->num_layers; a.output_dim = dw->output_dim + 1;
+            if (args_only) *args_only = a;
+            else puf_mtl::fused_rollout(stream, a);
+            return da->out;
+        }
+    }
+    return {};
+}
+#endif
+
 Prec arch_forward(Arch* p, Weights& w, Activations& activations,
         Prec obs, Prec state, cudaStream_t stream) {
+#ifdef PUF_METAL
+    Prec out = arch_try_fused_rollout(p, w, activations, obs, state, stream);
+    if (out.data) return out;
+#endif
     Prec enc_out = p->encoder.forward(
         w.encoder, activations.encoder, obs, stream);
     Prec h = p->network.forward(
@@ -939,12 +1353,30 @@ void arch_backward(Arch* p, Weights& w,
         Activations& activations, Float grad_logits,
         Float grad_logstd, Float grad_value, cudaStream_t stream) {
     int B = grad_logits.shape[0], TT = grad_logits.shape[1];
+#ifdef PUF_METAL
+    // Backward overlap (g_ov) for the standard decoder, MinGRU and encoder
+    // with every layer fused (their buffer lifetimes are the ones checked
+    // for it); the decoder dX GEMM must not use the workspace (no split-K).
+    if (bwd_overlap_env() && p->decoder.backward == decoder_backward
+            && p->network.backward == mingru_backward
+            && p->encoder.backward == encoder_backward
+            && ((DecoderWeights*)w.decoder)->output_dim + 1 < 2048) {
+        MinGRUWeights* mw = (MinGRUWeights*)w.network;
+        MinGRUActivations* ma = (MinGRUActivations*)activations.network;
+        bool all_fused = true;
+        for (int i = 0; i < mw->num_layers; i++) all_fused = all_fused && ma->fused[i];
+        if (all_fused) ov_start(stream);
+    }
+#endif
     Prec grad_h = p->decoder.backward(w.decoder,
         activations.decoder, *puf_squeeze(&grad_logits, 0),
         grad_logstd, *puf_squeeze(&grad_value, 0), stream);
     grad_h = p->network.backward(w.network,
         *puf_unsqueeze(&grad_h, 0, B, TT), activations.network, stream);
     p->encoder.backward(w.encoder, activations.encoder, grad_h, stream);
+#ifdef PUF_METAL
+    ov_drain();
+#endif
     puf_dw_join(stream); // sycn dW GEMMs before muon reads weight grads.
 }
 
@@ -954,6 +1386,26 @@ Activations arch_reg_train(Arch* p, Weights& w,
     a.encoder = calloc(1, p->encoder.activation_size);
     a.decoder = calloc(1, p->decoder.activation_size);
     a.network = calloc(1, sizeof(MinGRUActivations));
+#ifdef PUF_METAL
+    // Saved-input views instead of copies (see the save_view comments).
+    // Only the standard layers, whose inputs are known to stay immutable
+    // until their weight gradients are computed.
+    bool std_encoder = p->encoder.forward == encoder_forward
+        && p->encoder.backward == encoder_backward
+        && p->encoder.reg_train == encoder_reg_train;
+    if (std_encoder) ((EncoderActivations*)a.encoder)->save_view = true;
+    bool std_network = p->network.forward_train == mingru_forward_train
+        && p->network.backward == mingru_backward
+        && p->network.reg_train == mingru_reg_train;
+    if (std_network) {
+        ((MinGRUActivations*)a.network)->alias_encoder_output = std_encoder;
+        ((MinGRUActivations*)a.network)->alias_layer_inputs = true;
+        if (p->decoder.forward == decoder_forward && p->decoder.backward == decoder_backward
+                && p->decoder.reg_train == decoder_reg_train) {
+            ((DecoderActivations*)a.decoder)->save_view = true;
+        }
+    }
+#endif
     p->encoder.reg_train(w.encoder, a.encoder, acts, grads, B_TT);
     p->decoder.reg_train(w.decoder, a.decoder, acts, grads, B_TT);
     p->network.reg_train(w.network, a.network, acts, grads, B_TT);
@@ -1045,6 +1497,7 @@ Arch build_arch(int input_size, int hidden_size,
     };
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 __global__ void muon_sum_sq_partials(float* __restrict__ partials,
         const precision_t* __restrict__ src, int n) {
     __shared__ float sdata[256];
@@ -1110,6 +1563,7 @@ __global__ void muon_weight_update(float* __restrict__ wb,
         wb[idx] = wb[idx] * wd_scale - lr * to_float(update[idx]);
     }
 }
+#endif  // PUF_METAL
 
 constexpr double ns_coeffs[5][3] = {
     {4.0848, -6.8946, 2.9270},
@@ -1131,6 +1585,10 @@ struct Muon {
     Float mb;              // flat momentum buffer (param-sized)
     Prec gram, gram_buf, x_buf;
     Allocator* param_alloc;
+#ifdef PUF_METAL
+    void* ns_wide;          // puf_mtl::muon_ns_wide_rm per-matrix scratch
+    size_t ns_wide_bytes;
+#endif
 };
 
 void muon_init(Muon* m, Allocator* param_alloc, double momentum, Allocator* alloc) {
@@ -1157,19 +1615,79 @@ void muon_init(Muon* m, Allocator* param_alloc, double momentum, Allocator* allo
     alloc_register(alloc, &m->gram);
     alloc_register(alloc, &m->gram_buf);
     alloc_register(alloc, &m->x_buf);
+#ifdef PUF_METAL
+    m->ns_wide = nullptr;
+    m->ns_wide_bytes = 0;
+    long grad_offset = 0;
+    for (int _i = 0; _i < param_alloc->num_regs; _i++) {
+        AllocEntry& e = param_alloc->regs[_i];
+        long ne = numel(e.shape);
+        bool aligned_input = (grad_offset * sizeof(precision_t)) % 16 == 0;
+        grad_offset += ne;  // The flat gradient packs 1D parameters too.
+        if (ndim(e.shape) < 2) continue;
+        long R = e.shape[0], C = ne / R;
+        if (puf_mtl::muon_ns_wide_eligible((int)R, (int)C)) {
+            m->ns_wide_bytes += puf_mtl::muon_ns_wide_scratch_bytes((int)R, (int)C, aligned_input);
+        }
+    }
+    if (m->ns_wide_bytes) cudaMalloc(&m->ns_wide, m->ns_wide_bytes);
+#endif
 }
 
 void muon_step(Muon* m, Float weights, Prec grads,
         float max_grad_norm, cudaStream_t stream = 0) {
     int n_grad = (int)numel(grads.shape);
     int sum_blocks = min((int)grid_size(n_grad), 256);
-    muon_sum_sq_partials<<<sum_blocks, 256, 0, stream>>>(
+    PUF_LAUNCH(muon_sum_sq_partials, sum_blocks, 256, 0, stream)(
         m->norm_partials, grads.data, n_grad);
-    muon_sum_sq_reduce<<<1, 256, 0, stream>>>(
+    PUF_LAUNCH(muon_sum_sq_reduce, 1, 256, 0, stream)(
         m->grad_norm, m->norm_partials, sum_blocks);
-    muon_clip_nesterov<<<grid_size(n_grad), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(muon_clip_nesterov, grid_size(n_grad), BLOCK_SIZE, 0, stream)(
         m->mb.data, grads.data, m->grad_norm,
         max_grad_norm, 1e-6f, (float)m->momentum, n_grad);
+
+    static const float ns_flat[15] = {
+        (float)ns_coeffs[0][0], (float)ns_coeffs[0][1], (float)ns_coeffs[0][2],
+        (float)ns_coeffs[1][0], (float)ns_coeffs[1][1], (float)ns_coeffs[1][2],
+        (float)ns_coeffs[2][0], (float)ns_coeffs[2][1], (float)ns_coeffs[2][2],
+        (float)ns_coeffs[3][0], (float)ns_coeffs[3][1], (float)ns_coeffs[3][2],
+        (float)ns_coeffs[4][0], (float)ns_coeffs[4][1], (float)ns_coeffs[4][2]};
+    (void)ns_flat;
+#ifdef PUF_METAL
+    // Batched tails (same arithmetic as the loop below): up to 8 small
+    // matrices in one dispatch (gemm.h muon_ns5_batch_rm) and up to 8 others
+    // in 18 (muon_ns_wide_rm); `done` marks their param regs for the loop.
+    unsigned long long done = 0;
+    {
+        puf_mtl::MuonNSMatrix small[8], wide[8];
+        int n_small = 0, n_wide = 0;
+        unsigned long long small_bits = 0, wide_bits = 0;
+        long off = 0;
+        for (int _i = 0; _i < m->param_alloc->num_regs && _i < 64; _i++) {
+            AllocEntry& e = m->param_alloc->regs[_i];
+            long ne = numel(e.shape);
+            precision_t* ptr = grads.data + off;
+            off += ne;
+            if (ndim(e.shape) < 2) continue;
+            long R = e.shape[0], C = ne / R;
+            puf_mtl::MuonNSMatrix mat = {ptr, (int)R, (int)C, sqrtf(fmaxf(1.0f, (float)R / (float)C))};
+            if (n_small < 8 && puf_mtl::muon_ns5_eligible((int)R, (int)C)) {
+                small[n_small++] = mat;
+                small_bits |= 1ull << _i;
+            } else if (n_wide < 8 && puf_mtl::muon_ns_wide_eligible((int)R, (int)C)) {
+                wide[n_wide++] = mat;
+                wide_bits |= 1ull << _i;
+            }
+        }
+        if (n_small && puf_mtl::muon_ns5_batch_rm(stream, small, n_small, ns_flat, 1e-7f)) {
+            done |= small_bits;
+        }
+        if (n_wide && puf_mtl::muon_ns_wide_rm(stream, wide, n_wide, ns_flat, 1e-7f,
+                m->ns_wide, m->ns_wide_bytes)) {
+            done |= wide_bits;
+        }
+    }
+#endif
 
     // Per-param NS into workspace; write scaled update back into flat grads.
     // 1D params already hold their update in-place (scale 1).
@@ -1182,6 +1700,9 @@ void muon_step(Muon* m, Float weights, Prec grads,
         if (ndim(e.shape) < 2) {
             continue;
         }
+#ifdef PUF_METAL
+        if (_i < 64 && ((done >> _i) & 1)) continue;
+#endif
 
         long R = e.shape[0], C = ne / R;
         long M = min(R, C);
@@ -1192,15 +1713,21 @@ void muon_step(Muon* m, Float weights, Prec grads,
         Prec gram_buf = {.data = m->gram_buf.data, .shape = {M, M}};
 
         int nblk = min((int)grid_size(ne), 256);
-        muon_sum_sq_partials<<<nblk, 256, 0, stream>>>(
+        PUF_LAUNCH(muon_sum_sq_partials, nblk, 256, 0, stream)(
             m->norm_partials, x.data, (int)ne);
-        muon_sum_sq_reduce<<<1, 256, 0, stream>>>(
+        PUF_LAUNCH(muon_sum_sq_reduce, 1, 256, 0, stream)(
             m->ns_norm, m->norm_partials, nblk);
-        muon_l2_normalize<<<grid_size(ne), BLOCK_SIZE, 0, stream>>>(
+        PUF_LAUNCH(muon_l2_normalize, grid_size(ne), BLOCK_SIZE, 0, stream)(
             x.data, m->ns_norm, 1e-7f, (int)ne);
 
         // 5 steps land in x_buf. 4 = you break it.
+#ifdef PUF_METAL
+        bool ns_fused = puf_mtl::muon_ns5_rm(stream, x.data, x_buf.data, gram.data,
+            gram_buf.data, (int)R, (int)C, ns_flat);
+        for (int i = 0; i < 5 && !ns_fused; ++i) {
+#else
         for (int i = 0; i < 5; ++i) {
+#endif
             Prec& src = (i % 2 == 0) ? x : x_buf;
             Prec& dst = (i % 2 == 0) ? x_buf : x;
             if (tall) {
@@ -1221,10 +1748,10 @@ void muon_step(Muon* m, Float weights, Prec grads,
             }
         }
         float scale = sqrtf(fmaxf(1.0f, (float)R / (float)C));
-        muon_store_update<<<grid_size(ne), BLOCK_SIZE, 0, stream>>>(
+        PUF_LAUNCH(muon_store_update, grid_size(ne), BLOCK_SIZE, 0, stream)(
             gc_ptr, x_buf.data, scale, (int)ne);
     }
-    muon_weight_update<<<grid_size(n_grad), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(muon_weight_update, grid_size(n_grad), BLOCK_SIZE, 0, stream)(
         weights.data, grads.data, m->lr, 0.0f, n_grad);
 }
 
@@ -1255,6 +1782,7 @@ void register_train_buffers(TrainGraph& bufs, Allocator* alloc, int B, int T) {
     alloc_register(alloc, &bufs.mb_gae_v);
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 // TODO: test whether these finite/clamp guards improve continuous-control stability
 // or just hide bad logits/actions.
 __device__ __forceinline__ float finite_or_clamp(float x, float lo, float hi) {
@@ -1274,6 +1802,7 @@ __device__ __forceinline__ float safe_continuous_mean(const precision_t* logits,
 __device__ __forceinline__ float safe_continuous_logstd(const precision_t* logstd, int idx) {
     return finite_or_clamp(to_float(logstd[idx]), -20.0f, 2.0f);
 }
+#endif  // PUF_METAL
 
 enum LossIdx {
     LOSS_PG = 0, LOSS_VF = 1, LOSS_ENT = 2, LOSS_TOTAL = 3,
@@ -1357,6 +1886,7 @@ void register_ppo_buffers(PPOBufs& bufs, Allocator* alloc, int N, int T, int A_t
     cudaMalloc((void**)&bufs.ent_coef, sizeof(float));
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 // Discrete only. mask is always present (env mask or synthetic all-ones).
 __device__ __forceinline__ float load_logit_masked(
         const precision_t* __restrict__ logits, int logits_base,
@@ -1401,7 +1931,9 @@ __device__ __forceinline__ void ppo_continuous_head(
     *out_logp = -0.5f * normalized * normalized - HALF_LOG_2PI - log_std;
     *out_entropy = HALF_1_PLUS_LOG_2PI + log_std;
 }
+#endif  // PUF_METAL
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 // After decoder GEMM, before GAE. One logit walk: live V, ρ, logp=logit-lse.
 // logp is written into grad_logits (overwritten with grads after GAE).
 __global__ void cache_imp_and_v(
@@ -1473,6 +2005,7 @@ __global__ void cache_imp_and_v(
     new_lp_out[idx] = new_lp;
     imp_out[idx] = from_float(__expf(new_lp - to_float(old_logprobs[idx])));
 }
+#endif  // PUF_METAL
 
 Prec arch_forward_train(Arch* p, Weights& w,
         Activations& activations, Prec x,
@@ -1487,12 +2020,13 @@ Prec arch_forward_train(Arch* p, Weights& w,
     Prec dec_out = p->decoder.forward(
         w.decoder, activations.decoder, *puf_squeeze(&h, 0), stream);
     Prec dec = *puf_unsqueeze(&dec_out, 0, B, TT);
-    cache_imp_and_v<<<grid_size(B * TT), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(cache_imp_and_v, grid_size(B * TT), BLOCK_SIZE, 0, stream)(
         dec, g.mb_actions.data, g.mb_logprobs.data, g.mb_action_mask.data,
         logstd, act_sizes, g.mb_imp.data, g.mb_gae_v.data, logps, new_lp);
     return dec;
 }
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 __global__ void ppo_loss_compute(
         float* __restrict__ ppo_partials,
         PPOKernelArgs a, PPOGraphArgs g) {
@@ -1639,6 +2173,7 @@ __global__ void ppo_loss_reduce(
         losses_acc[LOSS_N] += 1.0f;
     }
 }
+#endif  // PUF_METAL
 
 void ppo_loss_fwd_bwd(
         Prec& dec_out,    // (N, T, fused_cols) - fused logits+value from decoder
@@ -1678,9 +2213,9 @@ void ppo_loss_fwd_bwd(
         .T_seq = T, .A_total = A_total, .N = N,
         .is_continuous = is_continuous,
     };
-    ppo_loss_compute<<<ppo_grid, PPO_THREADS, 0, stream>>>(
+    PUF_LAUNCH(ppo_loss_compute, ppo_grid, PPO_THREADS, 0, stream)(
             bufs.ppo_partials.data, args, graph_args);
-    ppo_loss_reduce<<<1, LOSS_N, 0, stream>>>(
+    PUF_LAUNCH(ppo_loss_reduce, 1, LOSS_N, 0, stream)(
         losses_acc, bufs.ppo_partials.data, ppo_grid);
 }
 
@@ -1688,6 +2223,7 @@ void ppo_loss_fwd_bwd(
 // 16B segment I/O (H % ADV_VEC_WIDTH == 0). Bench: tests/bench_puff_advantage.cu
 constexpr int ADV_VEC_WIDTH = 16 / (int)sizeof(precision_t);
 
+#ifndef PUF_METAL  // device code: Metal ports live in src/metal/shaders
 // Wide load/store of one ADV_VEC_WIDTH segment into float regs.
 __device__ __forceinline__ void adv_ld(const precision_t* p, float* o) {
     if constexpr (sizeof(precision_t) == sizeof(float)) {
@@ -1763,3 +2299,4 @@ __global__ void puff_advantage(const precision_t* values,
         adv_st(returns + base, ret);
     }
 }
+#endif  // PUF_METAL

@@ -28,6 +28,7 @@ struct AsteroidsEntityEncoderActivations {
     Int argmax;
 };
 
+#ifndef PUF_METAL
 __global__ void ae_materialize_points_kernel(
         precision_t* __restrict__ point_input,
         const precision_t* __restrict__ obs,
@@ -203,6 +204,8 @@ __global__ void ae_grad_entity_kernel(
     }
 }
 
+#endif  // PUF_METAL: kernels_envs.h + shaders/envs_entity.metal
+
 static AsteroidsEntityEncoderWeights* ae_encoder_create(int obs_size, int hidden) {
     assert(obs_size == AE_OBS_SIZE && "asteroids entity encoder expects the asteroids observation layout");
     AsteroidsEntityEncoderWeights* ew =
@@ -217,7 +220,7 @@ static Prec ae_encoder_forward(void* w, void* activations, Prec input, cudaStrea
     AsteroidsEntityEncoderActivations* a = (AsteroidsEntityEncoderActivations*)activations;
     int B = input.shape[0];
 
-    ae_materialize_points_kernel<<<grid_size(B * AE_NUM_POINTS * AE_ENTITY_IN), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(ae_materialize_points_kernel, grid_size(B * AE_NUM_POINTS * AE_ENTITY_IN), BLOCK_SIZE, 0, stream)(
         a->point_input.data, input.data, B, ew->obs_size);
     Prec point_input = {.data = a->point_input.data, .shape = {B, AE_NUM_POINTS, AE_ENTITY_IN}};
     Prec entity_hidden = {.data = a->entity_hidden.data, .shape = {B, AE_NUM_POINTS, AE_ENTITY_HIDDEN}};
@@ -229,7 +232,7 @@ static Prec ae_encoder_forward(void* w, void* activations, Prec input, cudaStrea
     size_t shared_bytes = (
         (size_t)AE_BATCH_TILE * AE_NUM_POINTS * AE_ENTITY_HIDDEN +
         (size_t)AE_HIDDEN_TILE * AE_ENTITY_HIDDEN) * sizeof(precision_t);
-    ae_linear_max_kernel<<<grid, block, shared_bytes, stream>>>(
+    PUF_LAUNCH(ae_linear_max_kernel, grid, block, shared_bytes, stream)(
         a->out.data, a->argmax.data, a->entity_hidden.data,
         ew->output_w.data, B, ew->hidden);
     return a->out;
@@ -240,10 +243,10 @@ static void ae_encoder_backward(void* w, void* activations, Prec grad, cudaStrea
     AsteroidsEntityEncoderActivations* a = (AsteroidsEntityEncoderActivations*)activations;
     int B = grad.shape[0];
 
-    ae_output_wgrad_kernel<<<ew->hidden, 256, 0, stream>>>(
+    PUF_LAUNCH(ae_output_wgrad_kernel, ew->hidden, 256, 0, stream)(
         a->output_wgrad.data, grad.data, a->entity_hidden.data, a->argmax.data, B, ew->hidden);
 
-    ae_grad_entity_kernel<<<B, BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(ae_grad_entity_kernel, B, BLOCK_SIZE, 0, stream)(
         a->grad_entity.data, grad.data, ew->output_w.data,
         a->entity_hidden.data, a->argmax.data, B, ew->hidden);
 

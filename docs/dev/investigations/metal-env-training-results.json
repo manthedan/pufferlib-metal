@@ -1,0 +1,109 @@
+{
+  "metal_commit": "87038a42",
+  "cuda_commit": "4fa5e83377c15b2f084383a00be86a36ab3fc56a",
+  "seed": 73,
+  "configs_sha256": {
+    "config/default.ini": "7f493977f49f2537a59c18c2a283f062e5d6063d9e130c2d15f6be075cda1084",
+    "config/cartpole.ini": "5c67f29a8b2e53f9f64be36c28c50dbf2a4a653f03a4420aedc150693a14ecf2",
+    "config/pong.ini": "fc4b26ef110b5bef75e69a39e86f8ead85140640c68932a855309dc41e3cd923",
+    "config/flappy.ini": "f443679ac395f267d800f1f39321e558d5a404aec467192e6a1ce79a01731014"
+  },
+  "score_definition": "env/score; train is last printed completed-episode snapshot, eval is final persisted metric",
+  "mean_sps_definition": "executed steps / final trainer uptime; excludes evaluation",
+  "results": [
+    {
+      "backend": "Metal",
+      "env": "cartpole",
+      "configured_steps": 15000000,
+      "steps": 14942208,
+      "epochs": 114,
+      "train_score": 199.872,
+      "train_perf": 0.994,
+      "eval_score": 199.8463592529297,
+      "eval_perf": 0.994260311126709,
+      "eval_episodes": 12288,
+      "final_sps": "4.8M",
+      "mean_sps": 4567432.218987226,
+      "train_uptime": 3.271467924118042
+    },
+    {
+      "backend": "Metal",
+      "env": "pong",
+      "configured_steps": 8000000,
+      "steps": 7995392,
+      "epochs": 122,
+      "train_score": 20.98,
+      "train_perf": 0.999,
+      "eval_score": 20.993791580200195,
+      "eval_perf": 0.999717652797699,
+      "eval_episodes": 10148,
+      "final_sps": "570.4K",
+      "mean_sps": 473307.97826338303,
+      "train_uptime": 16.892578125
+    },
+    {
+      "backend": "Metal",
+      "env": "flappy",
+      "configured_steps": 20000000,
+      "steps": 19922944,
+      "epochs": 152,
+      "train_score": 46.707,
+      "train_perf": 0.977,
+      "eval_score": 51.04318618774414,
+      "eval_perf": 0.9716699123382568,
+      "eval_episodes": 10466,
+      "final_sps": "2.7M",
+      "mean_sps": 2016107.450451237,
+      "train_uptime": 9.881886005401611
+    },
+    {
+      "backend": "CUDA",
+      "env": "cartpole",
+      "configured_steps": 15000000,
+      "steps": 14942208,
+      "epochs": 114,
+      "train_score": 70.834,
+      "train_perf": 0.349,
+      "eval_score": 199.4488067626953,
+      "eval_perf": 0.9922711253166199,
+      "eval_episodes": 12288,
+      "final_sps": "27.1M",
+      "mean_sps": 24261453.640711382,
+      "train_uptime": 0.6158826351165771
+    },
+    {
+      "backend": "CUDA",
+      "env": "pong",
+      "configured_steps": 8000000,
+      "steps": 7995392,
+      "epochs": 122,
+      "train_score": 12.211,
+      "train_perf": 0.74,
+      "eval_score": 20.815980911254883,
+      "eval_perf": 0.9918094873428345,
+      "eval_episodes": 10037,
+      "final_sps": "3.5M",
+      "mean_sps": 2837324.2856660113,
+      "train_uptime": 2.8179337978363037
+    },
+    {
+      "backend": "CUDA",
+      "env": "flappy",
+      "configured_steps": 20000000,
+      "steps": 19922944,
+      "epochs": 152,
+      "train_score": 45.514,
+      "train_perf": 0.951,
+      "eval_score": 50.64474868774414,
+      "eval_perf": 0.9687778949737549,
+      "eval_episodes": 10539,
+      "final_sps": "15.8M",
+      "mean_sps": 14545564.062586935,
+      "train_uptime": 1.369692087173462
+    }
+  ],
+  "_archive": {
+    "description": "Historical development results; numbers preserved",
+    "tree_commit": "e68239d9"
+  }
+}

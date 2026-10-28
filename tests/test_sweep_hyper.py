@@ -1,3 +1,15 @@
+# The Metal port exercises the production native optimizer and held-out GPs.
+# Select this path before importing the obsolete Python/GPyTorch stack.
+import sys
+if __name__ == '__main__' and '--metal' in sys.argv:
+    import pathlib
+    import subprocess
+    if sys.argv[1:] != ['--metal']:
+        raise SystemExit('usage: python3 ' + sys.argv[0] + ' --metal')
+    root = pathlib.Path(__file__).resolve().parents[1]
+    raise SystemExit(subprocess.call(
+        ['bash', 'tests/metal/run_test_protein.sh', 'test_protein_sweep'], cwd=root))
+
 import os
 import pickle
 

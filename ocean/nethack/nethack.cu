@@ -5,23 +5,28 @@
 // Bit-deterministic backward: scatter/bias sums via fixed-point integer
 // atomics; GEMMs through the shared puf_mm cublas path.
 
+#ifndef PUF_METAL
 __global__ void nh_bias_relu_kernel(
     precision_t* __restrict__ data, const precision_t* __restrict__ bias, int total, int dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
     data[idx] = from_float(fmaxf(0.0f, to_float(data[idx]) + to_float(bias[idx % dim])));
 }
+#endif  // PUF_METAL
 
+#ifndef PUF_METAL
 __global__ void nh_bias_kernel(
     precision_t* __restrict__ data, const precision_t* __restrict__ bias, int total, int dim) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= total) return;
     data[idx] = from_float(to_float(data[idx]) + to_float(bias[idx % dim]));
 }
+#endif  // PUF_METAL
 // GEMM + bias + relu (16 launches per forward)
 #define NH_MM_BR(A, W, O, BIAS) do { puf_mm((A), (W), (O), stream); \
     int64_t nn_ = numel((O)->shape); int dd_ = (int)(O)->shape[ndim((O)->shape) - 1]; \
-    nh_bias_relu_kernel<<<grid_size(nn_), BLOCK_SIZE, 0, stream>>>((O)->data, (BIAS).data, (int)nn_, dd_); } while (0)
+    PUF_LAUNCH(nh_bias_relu_kernel, grid_size(nn_), BLOCK_SIZE, 0, stream)((O)->data, (BIAS).data, (int)nn_, dd_); } while (0)
+#define NH_LAUNCH(k, g, b, s, st) PUF_LAUNCH(k, g, b, s, st)
 // constants
 // Obs layout (must match ocean/nethack/nethack.h):
 //   [0, 2*NH_MGRID)  full 79x21 glyph grid, int16 LE (map memory included)
@@ -192,10 +197,12 @@ static constexpr int NH_V3K = NETHACK_V3_K;
 static constexpr int NH_V3_MONF = 8, NH_V3_ITEMF = 8;
 static constexpr int NH_V3_IN = 40, NH_V3_HID = 32, NH_V3_TAIL = 36;
 static constexpr int NH_ITBL = NH_GLYPH_VOCAB; // inv/discovery table rows
+#ifndef PUF_METAL
 __global__ void nh_scale_kernel(precision_t* p, float a, int64_t n) {
     int64_t i = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) p[i] = from_float(to_float(p[i]) * a);
 }
+#endif  // PUF_METAL
 static constexpr int NH_AP_DIM = NH_P1 + 2;
 static constexpr int NH_TK_K = 8;
 static constexpr int NH_TK_DIM = NH_P1 + 2; // gated rep + (dx,dy)
@@ -312,28 +319,36 @@ static constexpr int NH_NSUB = NH_GM_NSUB;
 // scatter/bias sums are bit-identical run to run (float atomicAdd ordering is
 // not). Quantization (6e-8) is below fp32 accumulation error at these counts.
 static constexpr float NH_FXP = 16777216.0f;
+#ifndef PUF_METAL
 __device__ __forceinline__ void nh_fxp_atomic_add(long long* addr, float v) {
     atomicAdd((unsigned long long*)addr, (unsigned long long)(long long)__float2ll_rn(v * NH_FXP));
 }
+#endif  // PUF_METAL
+#ifndef PUF_METAL
 __device__ __forceinline__ float nh_fxp_to_float(long long v) {
     return (float)((double)v * (1.0 / 16777216.0));
 }
-static precision_t* nh_msg_w0_dev = nullptr; // NH_MSG_FROZEN: pristine trigram table
+#endif  // PUF_METAL
+#ifndef PUF_METAL
 __global__ void nh_f32_to_precision_kernel(precision_t* __restrict__ dst, const float* __restrict__ src, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = from_float(src[i]);
 }
+#endif  // PUF_METAL
+#ifndef PUF_METAL
 __global__ void nh_fxp_to_precision_kernel(
     precision_t* __restrict__ dst, const long long* __restrict__ src, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) dst[idx] = from_float(nh_fxp_to_float(src[idx]));
 }
+#endif  // PUF_METAL
 
 // Row-sparse fixed-point -> precision cast for the embed-table grad: a
 // minibatch touches only a few hundred of the 5977 rows (counts>0 or hot).
 // Untouched rows skip the int64 read; touched rows are re-zeroed in place,
 // replacing a full-table memset. Invariant: src is all-zero between
 // iterations (alloc_create zeroes it once).
+#ifndef PUF_METAL
 __global__ void nh_fxp_to_precision_rows_kernel(
     precision_t* __restrict__ dst, long long* __restrict__ src,
     const int* __restrict__ counts, const int* __restrict__ hot_map,
@@ -348,9 +363,11 @@ __global__ void nh_fxp_to_precision_rows_kernel(
     dst[idx] = from_float(nh_fxp_to_float(src[idx]));
     src[idx] = 0;
 }
+#endif  // PUF_METAL
 
 // Per-blstat normalization: log1p fields get log1p(max(v,0))*scale, the rest
 // v*scale. Hunger (21) and condition (25) are expanded, not scaled.
+#ifndef PUF_METAL
 __constant__ float NH_BL_SCALE[NH_BL_RAW] = {
     1.f/79, 1.f/21, // x, y
     1.f/25, 1.f/125, 1.f/25, 1.f/25, 1.f/25, 1.f/25, 1.f/25,  // str25 str125 dex con int wis cha
@@ -368,20 +385,25 @@ __constant__ int NH_BL_ISLOG[NH_BL_RAW] = {
     0,0,0,0,0,0,0,0,0, 1, 0,0,0, 1, 0,0,0,0,0, 1,1, 0, 0,0,0, 0, 0,
 };
 
+#endif  // PUF_METAL
+
 // kernels
 
+#ifndef PUF_METAL
 __device__ __forceinline__ int nh_bl_read_i32(const precision_t* p) {
     return (int)((unsigned int)(int)to_float(p[0])
                | ((unsigned int)(int)to_float(p[1]) << 8)
                | ((unsigned int)(int)to_float(p[2]) << 16)
                | ((unsigned int)(int)to_float(p[3]) << 24));
 }
+#endif  // PUF_METAL
 
 // Decode int16 LE glyph ids into an fp32 index buffer (full grid).
 // v5 semantic-class LUTs (host-built once at create, before graph capture)
 // (dx,dy) -> sector*4+band, dx in [-78,78], dy in [-20,20]; built on device
 // with the exact atan2f expression of the original featurizer (ULP-identical).
 static unsigned char* nh_secband_lut_dev = NULL;
+#ifndef PUF_METAL
 __global__ void nh_secband_init_kernel(unsigned char* lut) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= 157 * 41) return;
@@ -393,6 +415,7 @@ __global__ void nh_secband_init_kernel(unsigned char* lut) {
     int band = cheb < 3 ? 0 : cheb < 7 ? 1 : cheb < 15 ? 2 : 3;
     lut[idx] = (unsigned char)(sct * 4 + band);
 }
+#endif  // PUF_METAL
 static unsigned char* nh_locc_lut_dev = NULL;  // glyph -> 9-class local id
 static unsigned char* nh_terrc_lut_dev = NULL; // glyph -> 17-class terrain id
 static void nh_v5_luts_init(void) {
@@ -434,7 +457,7 @@ static void nh_v5_luts_init(void) {
     cudaMalloc(&nh_locc_lut_dev, NH_GLYPH_VOCAB);
     cudaMalloc(&nh_terrc_lut_dev, NH_GLYPH_VOCAB);
     cudaMalloc(&nh_secband_lut_dev, 157 * 41);
-    nh_secband_init_kernel<<<grid_size(157 * 41), BLOCK_SIZE>>>(nh_secband_lut_dev);
+    PUF_LAUNCH(nh_secband_init_kernel, grid_size(157 * 41), BLOCK_SIZE, 0, 0)(nh_secband_lut_dev);
     cudaMemcpy(nh_locc_lut_dev, loc, NH_GLYPH_VOCAB, cudaMemcpyHostToDevice);
     cudaMemcpy(nh_terrc_lut_dev, ter, NH_GLYPH_VOCAB, cudaMemcpyHostToDevice);
     free(loc); free(ter);
@@ -447,6 +470,7 @@ static void nh_haz_lut_init(void) {
 }
 // semantic crop gather: crop glyph ids -> class -> tiny class embedding.
 // Hero cell (crop center) is class 7 (mirrors croplab).
+#ifndef PUF_METAL
 __global__ void nh_loc3_gather_kernel(precision_t* __restrict__ x,
     const precision_t* __restrict__ locc_w, const float* __restrict__ crop_glyph,
     const unsigned char* __restrict__ lut, int B) {
@@ -458,6 +482,8 @@ __global__ void nh_loc3_gather_kernel(precision_t* __restrict__ x,
     int cls = p == (NH_CGRID / 2) ? 7 : (int)lut[g];
     x[t] = locc_w[cls * NH_LOCC_DIM + d];
 }
+#endif  // PUF_METAL
+#ifndef PUF_METAL
 __global__ void nh_loc3_scatter_kernel(long long* __restrict__ acc,
     const precision_t* __restrict__ dx, const float* __restrict__ crop_glyph,
     const unsigned char* __restrict__ lut, int B) {
@@ -470,10 +496,12 @@ __global__ void nh_loc3_scatter_kernel(long long* __restrict__ acc,
     float v = to_float(dx[t]);
     if (v != 0.0f) nh_fxp_atomic_add(&acc[cls * NH_LOCC_DIM + d], v);
 }
+#endif  // PUF_METAL
 // terrain featurize (forward-only; features carry no gradients): landmark
 // table (12x[seen,dx/78,dy/20,min(d,30)/30]) + sector radar (8x4x17,
 // log1p(c)/log1p(1660)). Mirrors terrlab2 exactly: bands digitize([3,7,15]),
 // hero cell counts as floor, all 17 classes counted incl. landmarks.
+#ifndef PUF_METAL
 __global__ void nh_terr_feat_kernel(precision_t* __restrict__ tf,
     const float* __restrict__ gidx, const precision_t* __restrict__ obs,
     const unsigned char* __restrict__ lut, const unsigned char* __restrict__ sblut,
@@ -522,6 +550,8 @@ __global__ void nh_terr_feat_kernel(precision_t* __restrict__ tf,
     for (int i = threadIdx.x; i < 8 * 4 * 17; i += blockDim.x)
         o[48 + i] = from_float(log1pf((float)sec[i]) * inv_log);
 }
+#endif  // PUF_METAL
+#ifndef PUF_METAL
 __global__ void nh_isum_pool_kernel(precision_t* __restrict__ concat,
     const precision_t* __restrict__ ih, const float* __restrict__ inv_idx, int B) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -533,9 +563,11 @@ __global__ void nh_isum_pool_kernel(precision_t* __restrict__ concat,
             acc += to_float(ih[((int64_t)b * NH_INV + s) * NH_ISUM_DIM + d]);
     concat[(int64_t)b * NH_CONCAT + NH_ISUM_CONCAT_OFF + d] = from_float(acc * 0.2f);
 }
+#endif  // PUF_METAL
 // ---- lab arm kernels: typed streams (deep values + 8-head pools) ----
 // token builder: 48-dim = [e_eff(glyph) 32 | dx dy cheb rank | type flags |
 // diff speed | pad]. gid stores the mapped GLYPH id (shared embed table).
+#ifndef PUF_METAL
 __global__ void nh_lab_tok_kernel(precision_t* __restrict__ tok, float* __restrict__ gid,
     const precision_t* __restrict__ obs, const precision_t* __restrict__ e_eff,
     const unsigned char* __restrict__ haz, int list_off, int is_mon, int B) {
@@ -583,7 +615,9 @@ __global__ void nh_lab_tok_kernel(precision_t* __restrict__ tok, float* __restri
     }
     o[d] = from_float(v);
 }
+#endif  // PUF_METAL
 // embed-table scatter for a stream's dtok buffer (first 32 dims only)
+#ifndef PUF_METAL
 __global__ void nh_lab_dE_scatter_kernel(long long* __restrict__ dE_i,
     const precision_t* __restrict__ dtok, const float* __restrict__ gid, int B) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -594,7 +628,9 @@ __global__ void nh_lab_dE_scatter_kernel(long long* __restrict__ dE_i,
     float v = to_float(dtok[(int64_t)bk * NH_LAB_IN + d]);
     if (v != 0.0f) nh_fxp_atomic_add(&dE_i[(int64_t)g * NH_EMBED_DIM + d], v);
 }
+#endif  // PUF_METAL
 
+#ifndef PUF_METAL
 __global__ void nh_decode_kernel(
     float* __restrict__ idx, const precision_t* __restrict__ obs, int B) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -604,9 +640,11 @@ __global__ void nh_decode_kernel(
     int g = (int)to_float(src[0]) | ((int)to_float(src[1]) << 8);
     idx[t] = (float)max(0, min(g, NH_GLYPH_VOCAB - 1));
 }
+#endif  // PUF_METAL
 
 // Egocentric crop glyph ids: window centered on the hero (blstats x,y),
 // off-map cells get the pad glyph.
+#ifndef PUF_METAL
 __global__ void nh_crop_kernel(
     float* __restrict__ crop, const float* __restrict__ idx,
     const precision_t* __restrict__ obs, int B) {
@@ -619,8 +657,10 @@ __global__ void nh_crop_kernel(
     crop[t] = (r < 0 || r >= NH_MAPH || c < 0 || c >= NH_MAPW)
         ? (float)NH_PAD_GLYPH : idx[b * NH_MGRID + r * NH_MAPW + c];
 }
+#endif  // PUF_METAL
 
 // Local view: per-cell embedding gather, flattened (B, NH_CGRID*NH_EMBED_DIM).
+#ifndef PUF_METAL
 __global__ void nh_local_gather_kernel(
     precision_t* __restrict__ x, const precision_t* __restrict__ E,
     const float* __restrict__ crop, int B) {
@@ -630,12 +670,14 @@ __global__ void nh_local_gather_kernel(
     int64_t cell = t / NH_EMBED_DIM; // b*NH_CGRID + p
     x[t] = E[(int64_t)(int)crop[cell] * NH_EMBED_DIM + d];
 }
+#endif  // PUF_METAL
 
 // glb1.w (P1, PCELLS*D) -> W' (PCELLS*P1, D), so T = E @ W'^T lands as
 // T[g, pos*P1+k]: the fused embed+flatten+layer1 lookup table, rebuilt with
 // E_eff materialization: residual factorization over the observed glyph id.
 // The observed id is post-shuffle (appearance space), so (kind, sub) cannot
 // re-leak identities the shuffle hid.
+#ifndef PUF_METAL
 __global__ void nh_eff_embed_kernel(precision_t* __restrict__ out,
     const precision_t* __restrict__ E, const precision_t* __restrict__ K,
     const precision_t* __restrict__ S) {
@@ -646,10 +688,12 @@ __global__ void nh_eff_embed_kernel(precision_t* __restrict__ out,
         + to_float(K[nh_glyph_kind[g] * NH_EMBED_DIM + d])
         + to_float(S[nh_glyph_sub[g] * NH_EMBED_DIM + d]));
 }
+#endif  // PUF_METAL
 
 // Factor grads: dE_eff/dE_res is identity (embed_wgrad IS dE_res); the factor
 // rows are deterministic per-row serial sums over the generated CSR lists,
 // launched after every dE_eff contribution has landed.
+#ifndef PUF_METAL
 __global__ void nh_ekind_grad_kernel(precision_t* __restrict__ dK,
     const precision_t* __restrict__ dE) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -660,6 +704,8 @@ __global__ void nh_ekind_grad_kernel(precision_t* __restrict__ dK,
         acc += to_float(dE[(int64_t)nh_kind_csr_glyph[j] * NH_EMBED_DIM + d]);
     dK[i] = from_float(acc);
 }
+#endif  // PUF_METAL
+#ifndef PUF_METAL
 __global__ void nh_esub_grad_kernel(precision_t* __restrict__ dS,
     const precision_t* __restrict__ dE) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -670,8 +716,10 @@ __global__ void nh_esub_grad_kernel(precision_t* __restrict__ dS,
         acc += to_float(dE[(int64_t)nh_sub_csr_glyph[j] * NH_EMBED_DIM + d]);
     dS[i] = from_float(acc);
 }
+#endif  // PUF_METAL
 
 // one small GEMM whenever the weights change.
+#ifndef PUF_METAL
 __global__ void nh_permute_g1_kernel(
     precision_t* __restrict__ wp, const precision_t* __restrict__ w) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -680,8 +728,10 @@ __global__ void nh_permute_g1_kernel(
     int pos = r / NH_P1, k = r % NH_P1;
     wp[i] = w[k * (NH_PCELLS * NH_EMBED_DIM) + pos * NH_EMBED_DIM + d];
 }
+#endif  // PUF_METAL
 
 // Inverse for the weight grad.
+#ifndef PUF_METAL
 __global__ void nh_unpermute_g1_kernel(
     precision_t* __restrict__ wg, const precision_t* __restrict__ wpg) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -690,6 +740,7 @@ __global__ void nh_unpermute_g1_kernel(
     int pos = r / NH_P1, k = r % NH_P1;
     wg[k * (NH_PCELLS * NH_EMBED_DIM) + pos * NH_EMBED_DIM + d] = wpg[i];
 }
+#endif  // PUF_METAL
 
 // Fused global view, one block per sample: stage 1 builds the 80 relu'd
 // 16-dim tokens in smem from the fused table (off-map positions read the pad
@@ -697,6 +748,7 @@ __global__ void nh_unpermute_g1_kernel(
 // 16->128 in registers and folds the elementwise max on the fly (argmax saved
 // for the sparse backward). Fixed token order + strict > keep argmax
 // deterministic. dxy is saved for the w_xy weight grad.
+#ifndef PUF_METAL
 __global__ void nh_patch_max_kernel(
     precision_t* __restrict__ glb_out, precision_t* __restrict__ t16_save,
     precision_t* __restrict__ dxy_save, int* __restrict__ argmax,
@@ -754,6 +806,7 @@ __global__ void nh_patch_max_kernel(
         argmax[(int64_t)b * NH_GLB_HID + o] = bm;
     }
 }
+#endif  // PUF_METAL
 
 // Backward through max + layer 2, one block per sample. dglb is already
 // relu-masked (and b2's grad accumulated) by nh_relu_bias_bwd. dW2 and dt16
@@ -771,6 +824,7 @@ __global__ void nh_fill_kernel(precision_t* p, float v, int n); // defined with 
 
 
 
+#ifndef PUF_METAL
 __global__ void nh_min_summax_kernel(precision_t* __restrict__ concat,
     float* __restrict__ amax, const precision_t* __restrict__ v,
     const float* __restrict__ vid, float eps, int n, int padv, int off, int B) {
@@ -792,7 +846,9 @@ __global__ void nh_min_summax_kernel(precision_t* __restrict__ concat,
     dst[d] = from_float(sm * eps);
     dst[NH_MV + d] = from_float(bm >= 0 ? mx : 0.0f);
 }
+#endif  // PUF_METAL
 // dv = broadcast(sum grad) + scatter(max grad); thread per (b, entity, dim).
+#ifndef PUF_METAL
 __global__ void nh_min_dv_kernel(precision_t* __restrict__ dv,
     const precision_t* __restrict__ grad_concat, const float* __restrict__ amax,
     const float* __restrict__ vid, float eps, int n, int padv, int off, int B) {
@@ -811,7 +867,9 @@ __global__ void nh_min_dv_kernel(precision_t* __restrict__ dv,
     }
     dv[t] = from_float(g);
 }
+#endif  // PUF_METAL
 // stream gates fwd: token-0 rep (both streams) + underfoot sum (items).
+#ifndef PUF_METAL
 __global__ void nh_min_sgate_kernel(precision_t* __restrict__ concat,
     const precision_t* __restrict__ rp, const precision_t* __restrict__ tok,
     const float* __restrict__ gid, int underfoot, int off, int B) {
@@ -832,7 +890,9 @@ __global__ void nh_min_sgate_kernel(precision_t* __restrict__ concat,
         dst[NH_INV_HID + d] = from_float(uf);
     }
 }
+#endif  // PUF_METAL
 // stream gates bwd: adds into drp (after its first write).
+#ifndef PUF_METAL
 __global__ void nh_min_sgate_bwd_kernel(precision_t* __restrict__ drp,
     const precision_t* __restrict__ grad_concat, const precision_t* __restrict__ tok,
     const float* __restrict__ gid, int underfoot, int off, int B) {
@@ -854,6 +914,7 @@ __global__ void nh_min_sgate_bwd_kernel(precision_t* __restrict__ drp,
         }
     }
 }
+#endif  // PUF_METAL
 // ---- inventory pass-through kernels (shared by GEN and MIN arms) ----
 // pass-throughs: wielded [r|sfeat], quivered [r|sfeat], worn-profile mean r.
 // thread per (b, dim): each output dim replays the serial version's exact
@@ -862,6 +923,7 @@ __global__ void nh_min_sgate_bwd_kernel(precision_t* __restrict__ drp,
 #ifndef NH_NO_APANEL
 // accessory slot of inventory slot k: 0 amulet, 1/2 worn rings by slot order,
 // 3 eyewear; -1 otherwise. Shared by forward and backward (same decision).
+#ifndef PUF_METAL
 __device__ __forceinline__ int nh_acc_slot(const float* __restrict__ vid,
     const precision_t* __restrict__ sfeat, int b, int k) {
     int g = (int)vid[(int64_t)b * NH_INV + k];
@@ -882,7 +944,9 @@ __device__ __forceinline__ int nh_acc_slot(const float* __restrict__ vid,
     }
     return n < cap ? base + n : -1;
 }
+#endif  // PUF_METAL
 #endif
+#ifndef PUF_METAL
 __global__ void nh_pass_kernel(precision_t* __restrict__ concat,
     const precision_t* __restrict__ inv_out, const precision_t* __restrict__ sfeat,
     const float* __restrict__ vid, int nopass, int passoff, int B) {
@@ -927,10 +991,12 @@ __global__ void nh_pass_kernel(precision_t* __restrict__ concat,
     }
     if (region == 2 && nworn > 0) *dst = from_float(wsum / (float)nworn);
 }
+#endif  // PUF_METAL
 // pass-through backward (runs AFTER the v-path GEMM's first write of inv_grad):
 // adds r-grads at flagged slots. One thread per sample; races impossible.
 // thread per (b, slot, dim): per-slot add order (wield, quiver, worn) matches
 // the serial version exactly per dim -> bit-identical.
+#ifndef PUF_METAL
 __global__ void nh_passbwd_kernel(precision_t* __restrict__ inv_grad,
     const precision_t* __restrict__ grad_concat, const precision_t* __restrict__ sfeat,
     const float* __restrict__ vid, int nopass, int passoff, int B) {
@@ -965,6 +1031,8 @@ __global__ void nh_passbwd_kernel(precision_t* __restrict__ inv_grad,
     }
 #endif
 }
+#endif  // PUF_METAL
+#ifndef PUF_METAL
 __global__ void nh_patch_max_bwd_kernel(
     precision_t* __restrict__ t16_io, long long* __restrict__ dw2_acc,
     const precision_t* __restrict__ dglb, const precision_t* __restrict__ w2,
@@ -1011,10 +1079,12 @@ __global__ void nh_patch_max_bwd_kernel(
         t16_io[(int64_t)b * (NH_TOK * NH_P1) + i] = from_float(t16s[i] > 0.0f ? v : 0.0f);
     }
 }
+#endif  // PUF_METAL
 
 // Decode int32 LE blstats + extra stats and expand to NH_BL_FEAT normalized
 // features (block map = the NH_F_* offsets). Warp per sample: one serial
 // thread per sample is a 200-op latency chain.
+#ifndef PUF_METAL
 __global__ void nh_blstats_kernel(
     precision_t* __restrict__ out, const precision_t* __restrict__ obs, int B) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1084,19 +1154,25 @@ __global__ void nh_blstats_kernel(
         dst[j] = from_float(fminf(fmaxf(f, -1.0f), 1.0f));
     }
 }
+#endif  // PUF_METAL
 
 // concat = [local hid | global hid | bl hid | bl raw feats]
 // trigram message branch
+#ifndef PUF_METAL
 __device__ __forceinline__ int nh_msg_lc(int c) {
     return (c >= 'A' && c <= 'Z') ? c + 32 : c; // lowercase; keep spaces/punct
 }
+#endif  // PUF_METAL
+#ifndef PUF_METAL
 __device__ __forceinline__ int nh_msg_hash(int c0, int c1, int c2) {
     unsigned key = ((unsigned)c0 << 16) | ((unsigned)c1 << 8) | (unsigned)c2;
     return (int)((key * 2654435761u) >> (32 - NH_MSG_LOG2V)); // top log2V bits
 }
+#endif  // PUF_METAL
 // per-position trigram bucket id (-1 for the padded tail / past the null). Ids
 // stay contiguous because the topline is null-terminated, so consumers break
 // at the first -1.
+#ifndef PUF_METAL
 __global__ void nh_msg_ids_kernel(
     float* __restrict__ ids, const precision_t* __restrict__ obs, int B) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1114,9 +1190,11 @@ __global__ void nh_msg_ids_kernel(
     }
     ids[i] = (float)nh_msg_hash(nh_msg_lc(c0), nh_msg_lc(c1), nh_msg_lc(c2));
 }
+#endif  // PUF_METAL
 // normalized-sum bag: block per sample, one warp = NH_MSG_HID lanes (lane d
 // owns output dim d). Each trigram is one coalesced read of msg_w[id]; sum
 // scaled by 1/sqrt(count+1). No relu (raw signed summary).
+#ifndef PUF_METAL
 __global__ void nh_msg_pool_kernel(
     precision_t* __restrict__ out, const precision_t* __restrict__ msg_w,
     const float* __restrict__ ids, int B) {
@@ -1133,10 +1211,12 @@ __global__ void nh_msg_pool_kernel(
     }
     out[(int64_t)b * NH_MSG_HID + d] = from_float(acc * rsqrtf((float)count + 1.0f));
 }
+#endif  // PUF_METAL
 // backward: scatter scale*dout into the trigram-table grad (fixed-point,
 // deterministic). Lane d writes bucket dim d, so the warp hits distinct
 // addresses (no intra-block contention); cross-block collisions on hot
 // buckets are bounded. dout read straight from the concat-grad slice.
+#ifndef PUF_METAL
 __global__ void nh_msg_bwd_kernel(
     long long* __restrict__ dmsg_acc, const precision_t* __restrict__ grad_concat,
     const float* __restrict__ ids, int B) {
@@ -1155,10 +1235,12 @@ __global__ void nh_msg_bwd_kernel(
     for (int t = 0; t < count; t++)
         nh_fxp_atomic_add(&dmsg_acc[(int64_t)(int)mi[t] * NH_MSG_HID + d], g);
 }
+#endif  // PUF_METAL
 
 // spell-key forward: per slot, build the 36-dim input [e_eff(book glyph) |
 // known, lev/7, fail/100, know/20000], key = spk_w . input. Saves inputs +
 // glyph ids for the backward; empty slot -> zero input -> zero key.
+#ifndef PUF_METAL
 __global__ void nh_spkey_kernel(precision_t* __restrict__ keys,
     precision_t* __restrict__ sp_in, float* __restrict__ sp_idx,
     const precision_t* __restrict__ spk_w, const precision_t* __restrict__ e_eff,
@@ -1195,9 +1277,11 @@ __global__ void nh_spkey_kernel(precision_t* __restrict__ keys,
         acc += to_float(spk_w[r * NH_SPIN + c]) * in[c];
     keys[(int64_t)bs * NH_SPKEY + r] = from_float(fmaxf(acc, 0.0f));
 }
+#endif  // PUF_METAL
 
 // inventory-style pool: project each relu'd slot rep, max over slots, bias,
 // relu (mirrors inv2). Saves the argmax slot per (sample, pool dim).
+#ifndef PUF_METAL
 __global__ void nh_sppool_kernel(precision_t* __restrict__ concat,
     precision_t* __restrict__ pool, int* __restrict__ amax,
     const precision_t* __restrict__ keys,
@@ -1222,10 +1306,12 @@ __global__ void nh_sppool_kernel(precision_t* __restrict__ concat,
     pool[t] = from_float(v);
     concat[(int64_t)b * NH_CONCAT + NH_SPELL_CONCAT_OFF + d] = from_float(v);
 }
+#endif  // PUF_METAL
 
 // spell sum-channel forward: masked sum x0.2 of relu'd key projections + 4
 // exact doorstep scalars (all in [0,1]; no spells -> minfail 1, maxlev 0,
 // n 0, minret 1).
+#ifndef PUF_METAL
 __global__ void nh_sp_doorstep_kernel(precision_t* __restrict__ concat,
     const precision_t* __restrict__ obs, int B) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1254,8 +1340,10 @@ __global__ void nh_sp_doorstep_kernel(precision_t* __restrict__ concat,
     }
     concat[(int64_t)b * NH_CONCAT + NH_SPELL_CONCAT_OFF + d] = from_float(v);
 }
+#endif  // PUF_METAL
 // dkeys = trunk-MLP grads (pre-staged in dkeys by the spm1 backward GEMM)
 // + pointer grads, gated by the key relu
+#ifndef PUF_METAL
 __global__ void nh_sp2_dk_kernel(precision_t* __restrict__ dkeys,
     const precision_t* __restrict__ ptr_dkeys, const precision_t* __restrict__ keys, int B) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1264,10 +1352,12 @@ __global__ void nh_sp2_dk_kernel(precision_t* __restrict__ dkeys,
     if (to_float(keys[t]) <= 0.0f) v = 0.0f;
     dkeys[t] = from_float(v);
 }
+#endif  // PUF_METAL
 // backward: scatter the concat-grad spell slice into the fxp dE staging
 // spell-key backward, stage 1: total per-slot rep grad = pool grad routed
 // through relu + argmax + spk2 projection, plus the pointer's key grads;
 // finally masked by the rep's own relu.
+#ifndef PUF_METAL
 __global__ void nh_spkey_dk_kernel(precision_t* __restrict__ dkeys,
     const precision_t* __restrict__ grad_concat, const precision_t* __restrict__ pool,
     const int* __restrict__ amax, const precision_t* __restrict__ spk2_w,
@@ -1288,8 +1378,10 @@ __global__ void nh_spkey_dk_kernel(precision_t* __restrict__ dkeys,
     if (to_float(keys[t]) <= 0.0f) v = 0.0f; // rep relu gate
     dkeys[t] = from_float(v);
 }
+#endif  // PUF_METAL
 
 // spk2 grads: (16x16 + 16) threads loop the batch; small enough to be cheap
+#ifndef PUF_METAL
 __global__ void nh_spk2_grad_kernel(precision_t* __restrict__ spk2_wgrad,
     precision_t* __restrict__ spk2_bgrad, const precision_t* __restrict__ grad_concat,
     const precision_t* __restrict__ pool, const int* __restrict__ amax,
@@ -1313,8 +1405,10 @@ __global__ void nh_spk2_grad_kernel(precision_t* __restrict__ spk2_wgrad,
     if (k == NH_SPKEY) spk2_bgrad[d] = from_float(acc);
     else spk2_wgrad[d * NH_SPKEY + k] = from_float(acc);
 }
+#endif  // PUF_METAL
 
 // stage 2: scatter d_embed = spk_w[:, :32]^T . dkey into the fxp dE staging
+#ifndef PUF_METAL
 __global__ void nh_spkey_dE_kernel(long long* __restrict__ dE_i,
     const precision_t* __restrict__ dkeys, const precision_t* __restrict__ spk_w,
     const float* __restrict__ sp_idx, int B) {
@@ -1329,8 +1423,10 @@ __global__ void nh_spkey_dE_kernel(long long* __restrict__ dE_i,
         acc += to_float(spk_w[r * NH_SPIN + d]) * to_float(dkeys[(int64_t)bs * NH_SPKEY + r]);
     if (acc != 0.0f) nh_fxp_atomic_add(&dE_i[(int64_t)g * NH_EMBED_DIM + d], acc);
 }
+#endif  // PUF_METAL
 
 
+#ifndef PUF_METAL
 __global__ void nh_concat_kernel(
     precision_t* __restrict__ out, const precision_t* __restrict__ loc,
     const precision_t* __restrict__ glb, const precision_t* __restrict__ inv,
@@ -1356,8 +1452,10 @@ __global__ void nh_concat_kernel(
         return; // spell slice: nh_spell_gather_kernel fills it afterwards
     out[idx] = val;
 }
+#endif  // PUF_METAL
 
 // Copy a per-sample slice [offset, offset+n) of a (B, stride) tensor into (B, n).
+#ifndef PUF_METAL
 __global__ void nh_slice_kernel(
     precision_t* __restrict__ dst, const precision_t* __restrict__ src,
     int B, int stride, int offset, int n) {
@@ -1365,9 +1463,11 @@ __global__ void nh_slice_kernel(
     if (idx >= B * n) return;
     dst[idx] = src[(idx / n) * stride + offset + idx % n];
 }
+#endif  // PUF_METAL
 
 // inventory entity branch
 
+#ifndef PUF_METAL
 __global__ void nh_inv_decode_kernel(
     float* __restrict__ idx, const precision_t* __restrict__ obs, int B, int off) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1377,8 +1477,10 @@ __global__ void nh_inv_decode_kernel(
     int g = (int)to_float(src[0]) | ((int)to_float(src[1]) << 8);
     idx[t] = (float)max(0, min(g, NH_GLYPH_VOCAB - 1));
 }
+#endif  // PUF_METAL
 
 // T_inv[g,k] = dot(E[g,:], inv1_w[k,:]) — 5977x16, sequential inner loop
+#ifndef PUF_METAL
 __global__ void nh_inv_table_kernel(precision_t* __restrict__ T,
     const precision_t* __restrict__ E, const precision_t* __restrict__ w1) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1389,9 +1491,11 @@ __global__ void nh_inv_table_kernel(precision_t* __restrict__ T,
         acc += to_float(E[g * NH_EMBED_DIM + d]) * to_float(w1[k * NH_EMBED_DIM + d]);
     T[i] = from_float(acc);
 }
+#endif  // PUF_METAL
 
 // Expand the 8 gated int8 state fields into NH_SFEAT normalized features.
 // Sentinels stay honest: unknown spe contributes (0 known-bit, 0 value).
+#ifndef PUF_METAL
 __global__ void nh_inv_sfeat_kernel(precision_t* __restrict__ out,
     const precision_t* __restrict__ obs, int B) {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1425,7 +1529,9 @@ __global__ void nh_inv_sfeat_kernel(precision_t* __restrict__ out,
     for (int c = 0; c < 7; c++)
         f[17 + c] = from_float(cat == c ? 1.0f : 0.0f);
 }
+#endif  // PUF_METAL
 
+#ifndef PUF_METAL
 __global__ void nh_inv_gather_kernel(precision_t* __restrict__ out,
     const precision_t* __restrict__ T, const precision_t* __restrict__ b1,
     const precision_t* __restrict__ ws, const precision_t* __restrict__ sfeat,
@@ -1446,12 +1552,14 @@ __global__ void nh_inv_gather_kernel(precision_t* __restrict__ out,
         v += to_float(ws[k * NH_SFEAT + j]) * to_float(f[j]);
     out[t] = from_float(v > 0.0f ? v : 0.0f);
 }
+#endif  // PUF_METAL
 
 // Pooled inventory summary for the trunk: per-slot 32 -> 128 with the
 // elementwise max over the 55 slots folded in (patch-encoder trick — the
 // (B,55,128) tokens never exist). Fixed slot order + strict > keep argmax
 // deterministic; ties (empty pad slots are identical) resolve to the lowest
 // slot, matching torch.max in the test reference.
+#ifndef PUF_METAL
 __global__ void nh_inv_max_kernel(precision_t* __restrict__ pool_out,
     int* __restrict__ argmax, const precision_t* __restrict__ inv_out,
     const precision_t* __restrict__ w2, const precision_t* __restrict__ b2, int B) {
@@ -1480,12 +1588,14 @@ __global__ void nh_inv_max_kernel(precision_t* __restrict__ pool_out,
         argmax[(int64_t)b * NH_INV_POOL + o] = bm;
     }
 }
+#endif  // PUF_METAL
 
 // Backward through the pooled max: dpool is already relu-masked (and b2's
 // grad accumulated) by nh_relu_bias_bwd. dW2 stages in fixed-point smem; ds
 // lands in inv_grad — every entry written, so callers skip the memset — where
 // the pointer-decoder key grads and the slot relu mask are applied next.
 // w2/inv_out are read through L2 (smem holds the two fxp accumulators: 46KB).
+#ifndef PUF_METAL
 __global__ void nh_inv_max_bwd_kernel(precision_t* __restrict__ inv_grad,
     long long* __restrict__ dw2_acc, const precision_t* __restrict__ dpool,
     const precision_t* __restrict__ w2, const precision_t* __restrict__ inv_out,
@@ -1517,9 +1627,11 @@ __global__ void nh_inv_max_bwd_kernel(precision_t* __restrict__ inv_grad,
     for (int i = threadIdx.x; i < NH_INV_FLAT; i += blockDim.x)
         inv_grad[(int64_t)b * NH_INV_FLAT + i] = from_float(nh_fxp_to_float(dss[i]));
 }
+#endif  // PUF_METAL
 
 // dT_inv scatter, plain global fxp atomics: 55x16 per sample is too small
 // for the hot-row machinery to pay
+#ifndef PUF_METAL
 __global__ void nh_dTinv_scatter_kernel(long long* __restrict__ dT,
     const precision_t* __restrict__ dflat, const float* __restrict__ idx, int64_t n,
     int skip_pad) {
@@ -1532,18 +1644,22 @@ __global__ void nh_dTinv_scatter_kernel(long long* __restrict__ dT,
     if (skip_pad && g == NH_GLYPH_VOCAB - 1) return;
     nh_fxp_atomic_add(&dT[(int64_t)g * NH_INV_HID + t % NH_INV_HID], v);
 }
+#endif  // PUF_METAL
 
+#ifndef PUF_METAL
 __global__ void nh_add_inplace_kernel(precision_t* __restrict__ dst,
     const precision_t* __restrict__ src, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) dst[i] = from_float(to_float(dst[i]) + to_float(src[i]));
 }
+#endif  // PUF_METAL
 
 // Fused relu backward + bias grad: masks grad in place against out and
 // accumulates the per-column sum into fixed-point bias_acc. Launch via
 // nh_colsum_grid so (gridDim*blockDim) % dim == 0: each thread's column is
 // then fixed across its grid-stride, so the sum lives in one register (fixed
 // order -> deterministic) and costs one quantize + global atomic.
+#ifndef PUF_METAL
 __global__ void nh_relu_bias_bwd_kernel(
     precision_t* __restrict__ grad, const precision_t* __restrict__ out,
     long long* __restrict__ bias_acc, int64_t total, int dim) {
@@ -1564,8 +1680,10 @@ __global__ void nh_relu_bias_bwd_kernel(
     for (int j = threadIdx.x; j < dim; j += blockDim.x)
         if (sdata[j] != 0) atomicAdd((unsigned long long*)&bias_acc[j], (unsigned long long)sdata[j]);
 }
+#endif  // PUF_METAL
 
 // bias-grad column sums without a relu mask (NH_ENT_LINPOOL: linear last entity layer)
+#ifndef PUF_METAL
 __global__ void nh_bias_bwd_kernel(
     precision_t* __restrict__ grad, const precision_t* __restrict__ out,
     long long* __restrict__ bias_acc, int64_t total, int dim) {
@@ -1581,12 +1699,13 @@ __global__ void nh_bias_bwd_kernel(
     for (int j = threadIdx.x; j < dim; j += blockDim.x)
         if (sdata[j] != 0) atomicAdd((unsigned long long*)&bias_acc[j], (unsigned long long)sdata[j]);
 }
+#endif  // PUF_METAL
 // NH_ENT_LINPOOL: the last per-entity layer (inventory / monster / item / spell MLPs)
 // is linear before sum|max pooling; default keeps the relu.
 #ifdef NH_ENT_LINPOOL
 #define NH_ENT_LAST(A, W, O, BIAS) do { puf_mm((A), (W), (O), stream); \
     int64_t nn_ = numel((O)->shape); int dd_ = (int)(O)->shape[ndim((O)->shape) - 1]; \
-    nh_bias_kernel<<<grid_size(nn_), BLOCK_SIZE, 0, stream>>>((O)->data, (BIAS).data, (int)nn_, dd_); } while (0)
+    PUF_LAUNCH(nh_bias_kernel, grid_size(nn_), BLOCK_SIZE, 0, stream)((O)->data, (BIAS).data, (int)nn_, dd_); } while (0)
 #define NH_ENT_LAST_BWD nh_bias_bwd_kernel
 #else
 #define NH_ENT_LAST(A, W, O, BIAS) NH_MM_BR(A, W, O, BIAS)
@@ -1600,6 +1719,7 @@ static inline int nh_colsum_grid(int64_t total, int dim) {
 }
 
 // Cast the packed fixed-point bias accumulators to their grad tensors in one launch.
+#ifndef PUF_METAL
 __global__ void nh_bias_flush_kernel(
     const long long* __restrict__ acc,
     precision_t* __restrict__ d0, int n0, precision_t* __restrict__ d1, int n1,
@@ -1616,6 +1736,7 @@ __global__ void nh_bias_flush_kernel(
     else if ((i -= n4) < n5) d5[i] = from_float(v);
     else if ((i -= n5) < n6) d6[i] = from_float(v);
 }
+#endif  // PUF_METAL
 
 // embedding backward
 // Both views are linear in the embeddings, so dE is a scatter-add of per-cell
@@ -1626,6 +1747,7 @@ __global__ void nh_bias_flush_kernel(
 
 // Per-minibatch glyph histogram (per-block smem: hot counters would otherwise
 // serialize global atomics).
+#ifndef PUF_METAL
 __global__ void nh_hist_kernel(int* __restrict__ counts, const float* __restrict__ idx, int N) {
     __shared__ int hist[NH_GLYPH_VOCAB];
     for (int i = threadIdx.x; i < NH_GLYPH_VOCAB; i += blockDim.x) hist[i] = 0;
@@ -1638,9 +1760,11 @@ __global__ void nh_hist_kernel(int* __restrict__ counts, const float* __restrict
     for (int g = threadIdx.x; g < NH_GLYPH_VOCAB; g += blockDim.x)
         if (hist[g]) atomicAdd(&counts[g], hist[g]);
 }
+#endif  // PUF_METAL
 
 // Top-K glyphs by count (single block; counts are consumed).
 // hot_map must be pre-set to -1.
+#ifndef PUF_METAL
 __global__ void nh_hot_select_kernel(
     int* __restrict__ hot_map, int* __restrict__ hot_list, int* __restrict__ hot_n,
     int* __restrict__ counts, int K) {
@@ -1670,9 +1794,11 @@ __global__ void nh_hot_select_kernel(
         __syncthreads();
     }
 }
+#endif  // PUF_METAL
 
 // Local-view dE scatter: add each crop cell's 32-dim grad vector (contiguous
 // in dvec) into its glyph's embed-grad row.
+#ifndef PUF_METAL
 __global__ void nh_dE_scatter_kernel(
     long long* __restrict__ dE_i, const precision_t* __restrict__ dvec,
     const float* __restrict__ gidx, const int* __restrict__ hot_map,
@@ -1704,11 +1830,13 @@ __global__ void nh_dE_scatter_kernel(
                       (unsigned long long)v);
     }
 }
+#endif  // PUF_METAL
 
 // Global-view dT scatter: dT[g, pos*P1+k] += dt16[b, tk*P1+k] for every
 // (token, position) occurrence of glyph g. One thread per (b, tk, k) element,
 // quantized once; the 32 positions then add the same integer (hot glyphs via
 // smem, cold straight to global — same scheme as the old conv1 dT scatter).
+#ifndef PUF_METAL
 __global__ void nh_dT_patch_scatter_kernel(
     long long* __restrict__ dT_i, const precision_t* __restrict__ dt16,
     const float* __restrict__ idx, const int* __restrict__ hot_map,
@@ -1747,9 +1875,11 @@ __global__ void nh_dT_patch_scatter_kernel(
                       (unsigned long long)v);
     }
 }
+#endif  // PUF_METAL
 
 // Plain per-column sum (b1's grad from dt16 rows); same launch contract as
 // nh_relu_bias_bwd (dt16 is already relu-masked there, so no second mask).
+#ifndef PUF_METAL
 __global__ void nh_col_sum_kernel(
     long long* __restrict__ bias_acc, const precision_t* __restrict__ src,
     int64_t total, int dim) {
@@ -1765,9 +1895,11 @@ __global__ void nh_col_sum_kernel(
     for (int j = threadIdx.x; j < dim; j += blockDim.x)
         if (sdata[j] != 0) atomicAdd((unsigned long long*)&bias_acc[j], (unsigned long long)sdata[j]);
 }
+#endif  // PUF_METAL
 
 // += variant of the row-sparse cast: adds the local view's embed grads on top
 // of the global view's GEMM-produced dE (same guard + re-zero contract).
+#ifndef PUF_METAL
 __global__ void nh_fxp_add_rows_kernel(
     precision_t* __restrict__ dst, long long* __restrict__ src,
     const int* __restrict__ counts, const int* __restrict__ hot_map,
@@ -1779,17 +1911,21 @@ __global__ void nh_fxp_add_rows_kernel(
     dst[idx] = from_float(to_float(dst[idx]) + nh_fxp_to_float(src[idx]));
     src[idx] = 0;
 }
+#endif  // PUF_METAL
 
 // Seed the grid-glyph histogram with the static pad-glyph count (edge-patch
 // positions past the map read the pad row; the hist over glyph_idx can't see
 // them, but the rows-cast guard and hot selection must).
+#ifndef PUF_METAL
 __global__ void nh_count_pad_kernel(int* __restrict__ counts, int pad, int B) {
     if (threadIdx.x == 0 && blockIdx.x == 0)
         counts[pad] += NH_PAD_PER_SAMPLE * B;
 }
+#endif  // PUF_METAL
 
 // identity embeddings: indices recovered from the one-hot obs block (align
 // from blstats), table rows copied raw into the concat tail (bl-feats idiom)
+#ifndef PUF_METAL
 __global__ void nh_idemb_kernel(precision_t* __restrict__ concat,
     float* __restrict__ idx_out, const precision_t* __restrict__ obs,
     const precision_t* __restrict__ role_w, const precision_t* __restrict__ race_w,
@@ -1817,8 +1953,10 @@ __global__ void nh_idemb_kernel(precision_t* __restrict__ concat,
     c += NH_IDE_GEND;
     for (int d = 0; d < NH_IDE_ALGN; d++) c[d] = algn_w[al * NH_IDE_ALGN + d];
 }
+#endif  // PUF_METAL
 
 // table grads: one thread per (row, dim), fixed batch loop -- deterministic
+#ifndef PUF_METAL
 __global__ void nh_idemb_grad_kernel(precision_t* __restrict__ role_g,
     precision_t* __restrict__ race_g, precision_t* __restrict__ gend_g,
     precision_t* __restrict__ algn_g, const precision_t* __restrict__ grad_concat,
@@ -1842,6 +1980,7 @@ __global__ void nh_idemb_grad_kernel(precision_t* __restrict__ role_g,
     }
     out[row * wdt + d] = from_float(acc);
 }
+#endif  // PUF_METAL
 
 // encoder structs
 
@@ -1853,6 +1992,7 @@ struct NethackEncoderWeights {
     Prec inv1_w, inv1_b, inv1s_w, invt_w;
     Prec bl_w, bl_b, proj_w, proj_b;
     Prec msg_w; // trigram embedding table (NH_MSG_VOCAB, NH_MSG_HID)
+    precision_t* msg_w0_dev; // NH_MSG_FROZEN: this policy's cached table
     Prec spk_w; // spell slot-rep projection (NH_SPKEY, NH_SPIN)
     Prec spm1_w, spm1_b, spm2_w, spm2_b; // spell per-slot MLP 16->64->64
     Prec ide_role_w, ide_race_w, ide_gend_w, ide_algn_w; // identity tables
@@ -1863,6 +2003,17 @@ struct NethackEncoderWeights {
     Prec im1_w, im1_b, im2_w, im2_b;     // item MLP 16->64->64
     int obs_size, hidden;
 };
+
+// Rebuild weight-derived state after initialization or checkpoint loading.
+// Frozen forwards restore this table, so it must track the loaded policy.
+static void nethack_refresh_weight_cache(void* w, cudaStream_t stream) {
+#ifdef NH_MSG_FROZEN
+    NethackEncoderWeights* ew = (NethackEncoderWeights*)w;
+    size_t bytes = (size_t)NH_MSG_VOCAB * NH_MSG_HID * sizeof(precision_t);
+    if (!ew->msg_w0_dev) cudaMalloc(&ew->msg_w0_dev, bytes);
+    cudaMemcpyAsync(ew->msg_w0_dev, ew->msg_w.data, bytes, cudaMemcpyDeviceToDevice, stream);
+#endif
+}
 
 struct NethackEncoderActivations {
     Float glyph_idx, crop_glyph; // decoded grid + crop glyph ids
@@ -1954,36 +2105,36 @@ static Prec nethack_encoder_forward(void* w, void* activations, Prec input, cuda
     NethackEncoderActivations* a = (NethackEncoderActivations*)activations;
     int B = input.shape[0];
 
-    nh_eff_embed_kernel<<<grid_size(NH_GLYPH_VOCAB * NH_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_eff_embed_kernel, grid_size(NH_GLYPH_VOCAB * NH_EMBED_DIM), BLOCK_SIZE, 0, stream)(
         a->e_eff.data, ew->embed_w.data, ew->ekind_w.data, ew->esub_w.data);
-    nh_decode_kernel<<<grid_size(B * NH_MGRID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_decode_kernel, grid_size(B * NH_MGRID), BLOCK_SIZE, 0, stream)(
         a->glyph_idx.data, input.data, B);
-    nh_crop_kernel<<<grid_size(B * NH_CGRID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_crop_kernel, grid_size(B * NH_CGRID), BLOCK_SIZE, 0, stream)(
         a->crop_glyph.data, a->glyph_idx.data, input.data, B);
-    nh_loc3_gather_kernel<<<grid_size(B * NH_LOC_IN), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_loc3_gather_kernel, grid_size(B * NH_LOC_IN), BLOCK_SIZE, 0, stream)(
         a->x_local.data, ew->locc_w.data, a->crop_glyph.data, nh_locc_lut_dev, B);
     NH_MM_BR(&a->x_local, &ew->loc_w, &a->loc_h1, ew->loc_b);
     NH_MM_BR(&a->loc_h1, &ew->loc2_w, &a->loc_out, ew->loc2_b);
 
     // terrain branch replaces the patch encoder: featurize (fwd-only, no
     // input grads) -> 592 -> 256 -> 128 into the glb slot
-    nh_terr_feat_kernel<<<B, 256, 0, stream>>>(
+    PUF_LAUNCH(nh_terr_feat_kernel, B, 256, 0, stream)(
         a->terr_tf.data, a->glyph_idx.data, input.data, nh_terrc_lut_dev,
         nh_secband_lut_dev, B);
     NH_MM_BR(&a->terr_tf, &ew->terr1_w, &a->terr_h, ew->terr1_b);
     NH_MM_BR(&a->terr_h, &ew->terr2_w, &a->glb_out, ew->terr2_b);
 
-    nh_inv_decode_kernel<<<grid_size(B * NH_INV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_inv_decode_kernel, grid_size(B * NH_INV), BLOCK_SIZE, 0, stream)(
         a->inv_idx.data, input.data, B, NH_INV_OFF);
-    nh_inv_decode_kernel<<<grid_size(B * NH_INV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_inv_decode_kernel, grid_size(B * NH_INV), BLOCK_SIZE, 0, stream)(
         a->invt_idx.data, input.data, B, NH_INVTRUE_OFF);
-    nh_inv_table_kernel<<<grid_size(NH_GLYPH_VOCAB * NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_inv_table_kernel, grid_size(NH_GLYPH_VOCAB * NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->inv_T.data, a->e_eff.data, ew->inv1_w.data);
-    nh_inv_table_kernel<<<grid_size(NH_GLYPH_VOCAB * NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_inv_table_kernel, grid_size(NH_GLYPH_VOCAB * NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->invt_T.data, a->e_eff.data, ew->invt_w.data);
-    nh_inv_sfeat_kernel<<<grid_size(B * NH_INV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_inv_sfeat_kernel, grid_size(B * NH_INV), BLOCK_SIZE, 0, stream)(
         a->inv_sfeat.data, input.data, B);
-    nh_inv_gather_kernel<<<grid_size(B * NH_INV_FLAT), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_inv_gather_kernel, grid_size(B * NH_INV_FLAT), BLOCK_SIZE, 0, stream)(
         a->inv_out.data, a->inv_T.data, ew->inv1_b.data, ew->inv1s_w.data,
         a->inv_sfeat.data, a->inv_idx.data, a->invt_T.data, a->invt_idx.data, B);
     { Prec invf = {.data = a->inv_out.data, .shape = {B * NH_INV, NH_INV_HID}};
@@ -1992,37 +2143,37 @@ static Prec nethack_encoder_forward(void* w, void* activations, Prec input, cuda
     { Prec h1f = {.data = a->mh1.data, .shape = {B * NH_INV, NH_MV}};
       Prec vf = {.data = a->mvv.data, .shape = {B * NH_INV, NH_MV}};
       NH_ENT_LAST(&h1f, &ew->mv2_w, &vf, ew->mv2_b); }
-    nh_min_summax_kernel<<<grid_size(B * NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_summax_kernel, grid_size(B * NH_MV), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->mvmax.data, a->mvv.data, a->inv_idx.data,
         0.2f, NH_INV, NH_PAD_GLYPH, NH_MINV_OFF, B);
 #ifdef NH_NOPASS
-    nh_pass_kernel<<<grid_size(B * NH_PASS_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_pass_kernel, grid_size(B * NH_PASS_DIM), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->inv_out.data, a->inv_sfeat.data, a->inv_idx.data,
         7, NH_MINV_OFF + 2 * NH_MV, B);
 #else
-    nh_pass_kernel<<<grid_size(B * NH_PASS_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_pass_kernel, grid_size(B * NH_PASS_DIM), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->inv_out.data, a->inv_sfeat.data, a->inv_idx.data,
         0, NH_MINV_OFF + 2 * NH_MV, B);
 #endif
 
-    nh_blstats_kernel<<<grid_size(B * 32), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_blstats_kernel, grid_size(B * 32), BLOCK_SIZE, 0, stream)(
         a->bl_feats.data, input.data, B);
     NH_MM_BR(&a->bl_feats, &ew->bl_w, &a->bl_out, ew->bl_b);
 
 #ifdef NH_MSG_FROZEN
-    cudaMemcpyAsync(ew->msg_w.data, nh_msg_w0_dev, (size_t)NH_MSG_VOCAB * NH_MSG_HID * sizeof(precision_t), cudaMemcpyDeviceToDevice, stream);
+    cudaMemcpyAsync(ew->msg_w.data, ew->msg_w0_dev, (size_t)NH_MSG_VOCAB * NH_MSG_HID * sizeof(precision_t), cudaMemcpyDeviceToDevice, stream);
 #endif
-    nh_msg_ids_kernel<<<grid_size(B * NH_MSG_LEN), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_msg_ids_kernel, grid_size(B * NH_MSG_LEN), BLOCK_SIZE, 0, stream)(
         a->msg_ids.data, input.data, B);
-    nh_msg_pool_kernel<<<B, NH_MSG_HID, 0, stream>>>(
+    PUF_LAUNCH(nh_msg_pool_kernel, B, NH_MSG_HID, 0, stream)(
         a->msg_out.data, ew->msg_w.data, a->msg_ids.data, B);
 
-    nh_concat_kernel<<<grid_size(B * NH_CONCAT), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_concat_kernel, grid_size(B * NH_CONCAT), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->loc_out.data, a->glb_out.data,
         (const precision_t*)NULL, // invpool slice is width-0
         a->bl_out.data, a->bl_feats.data, a->msg_out.data, B);
     { // typed streams: tok -> deep values (48->64->64) -> 8-head pool
-    nh_lab_tok_kernel<<<grid_size(B * NH_LABK * NH_LAB_IN), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_lab_tok_kernel, grid_size(B * NH_LABK * NH_LAB_IN), BLOCK_SIZE, 0, stream)(
         a->lm_tok.data, a->lm_gid.data, input.data, a->e_eff.data,
         nh_haz_lut_dev,
         NH_TOKM_OFF, 1, B);
@@ -2035,14 +2186,14 @@ static Prec nethack_encoder_forward(void* w, void* activations, Prec input, cuda
     { Prec h1f = {.data = a->mh1m.data, .shape = {B * NH_LABK, NH_MV}};
       Prec vf = {.data = a->mvm.data, .shape = {B * NH_LABK, NH_MV}};
       NH_ENT_LAST(&h1f, &ew->mm2_w, &vf, ew->mm2_b); }
-    nh_min_summax_kernel<<<grid_size(B * NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_summax_kernel, grid_size(B * NH_MV), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->mvmaxm.data, a->mvm.data, a->lm_gid.data,
         0.25f, NH_LABK, -1, NH_MLM_OFF, B);
-    nh_min_sgate_kernel<<<grid_size(B * NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_sgate_kernel, grid_size(B * NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->mrp.data, a->lm_tok.data, a->lm_gid.data,
         0, NH_MLM_OFF + 2 * NH_MV, B);
-    nh_lab_tok_kernel<<<grid_size(B * NH_LABK * NH_LAB_IN), BLOCK_SIZE, 0, stream>>>(
-        a->li_tok.data, a->li_gid.data, input.data, a->e_eff.data, NULL, NH_TOKI_OFF, 0, B);
+    PUF_LAUNCH(nh_lab_tok_kernel, grid_size(B * NH_LABK * NH_LAB_IN), BLOCK_SIZE, 0, stream)(
+        a->li_tok.data, a->li_gid.data, input.data, a->e_eff.data, (const unsigned char*)NULL, NH_TOKI_OFF, 0, B);
     { Prec tokf = {.data = a->li_tok.data, .shape = {B * NH_LABK, NH_LAB_IN}};
       Prec rpf = {.data = a->irp.data, .shape = {B * NH_LABK, NH_INV_HID}};
       NH_MM_BR(&tokf, &ew->ir_w, &rpf, ew->ir_b); }
@@ -2052,14 +2203,14 @@ static Prec nethack_encoder_forward(void* w, void* activations, Prec input, cuda
     { Prec h1f = {.data = a->mh1i.data, .shape = {B * NH_LABK, NH_MV}};
       Prec vf = {.data = a->mvi.data, .shape = {B * NH_LABK, NH_MV}};
       NH_ENT_LAST(&h1f, &ew->im2_w, &vf, ew->im2_b); }
-    nh_min_summax_kernel<<<grid_size(B * NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_summax_kernel, grid_size(B * NH_MV), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->mvmaxi.data, a->mvi.data, a->li_gid.data,
         0.25f, NH_LABK, -1, NH_MLI_OFF, B);
-    nh_min_sgate_kernel<<<grid_size(B * NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_sgate_kernel, grid_size(B * NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->irp.data, a->li_tok.data, a->li_gid.data,
         1, NH_MLI_OFF + 2 * NH_MV, B);
     }
-    nh_spkey_kernel<<<grid_size(B * NH_SPELL_SLOTS * NH_SPKEY), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_spkey_kernel, grid_size(B * NH_SPELL_SLOTS * NH_SPKEY), BLOCK_SIZE, 0, stream)(
         a->spk_keys.data, a->spk_in.data, a->spell_idx.data,
         ew->spk_w.data, a->e_eff.data, input.data, B);
     { Prec kf = {.data = a->spk_keys.data, .shape = {B * NH_SPELL_SLOTS, NH_SPKEY}};
@@ -2068,12 +2219,12 @@ static Prec nethack_encoder_forward(void* w, void* activations, Prec input, cuda
     { Prec hf = {.data = a->sph1.data, .shape = {B * NH_SPELL_SLOTS, NH_SPM}};
       Prec vf = {.data = a->spv.data, .shape = {B * NH_SPELL_SLOTS, NH_SPM}};
       NH_ENT_LAST(&hf, &ew->spm2_w, &vf, ew->spm2_b); }
-    nh_min_summax_kernel<<<grid_size(B * NH_SPM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_summax_kernel, grid_size(B * NH_SPM), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->spvmax.data, a->spv.data, a->spell_idx.data,
         0.25f, NH_SPELL_SLOTS, -1, NH_SPELL_CONCAT_OFF, B);
-    nh_sp_doorstep_kernel<<<grid_size(B * 4), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_sp_doorstep_kernel, grid_size(B * 4), BLOCK_SIZE, 0, stream)(
         a->concat.data, input.data, B);
-    nh_idemb_kernel<<<grid_size(B), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_idemb_kernel, grid_size(B), BLOCK_SIZE, 0, stream)(
         a->concat.data, a->ide_idx.data, input.data,
         ew->ide_role_w.data, ew->ide_race_w.data,
         ew->ide_gend_w.data, ew->ide_algn_w.data, B);
@@ -2093,7 +2244,7 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
     // fixed-point bias-grad accumulators: [proj H | loc 256 | glb2/terr2 128 | bl 64 | glb1 16? | inv1 | inv2 128?]
     long long* bacc = (long long*)a->bias_acc.data;
     cudaMemsetAsync(bacc, 0, (H + NH_LOC_HID + NH_GLB_HID + NH_BL_HID + NH_BACC_GLB1 + NH_INV_HID + NH_BACC_INVP) * sizeof(long long), stream);
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * H, H), BLOCK_SIZE, H * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * H, H), BLOCK_SIZE, H * sizeof(long long), stream)(
         grad.data, a->out.data, bacc, (int64_t)B * H, H);
     puf_mm_tn(&grad, &a->concat, &a->proj_wgrad, stream);
 
@@ -2101,16 +2252,16 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
     Prec grad_concat = {.data = a->concat.data, .shape = {B, NH_CONCAT}};
     puf_mm_nn(&grad, &ew->proj_w, &grad_concat, stream);
 
-    nh_idemb_grad_kernel<<<grid_size(13 * NH_IDE_ROLE + 5 * NH_IDE_RACE
-        + 2 * NH_IDE_GEND + 3 * NH_IDE_ALGN), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_idemb_grad_kernel, grid_size(13 * NH_IDE_ROLE + 5 * NH_IDE_RACE
+        + 2 * NH_IDE_GEND + 3 * NH_IDE_ALGN), BLOCK_SIZE, 0, stream)(
         a->ide_role_wgrad.data, a->ide_race_wgrad.data, a->ide_gend_wgrad.data,
         a->ide_algn_wgrad.data, grad_concat.data, a->ide_idx.data, B);
 
     // Local view: wgrad against saved x_local, then the input grad overwrites
     // x_local in place before scattering into the embed table.
-    nh_slice_kernel<<<grid_size(B * NH_LOC_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_slice_kernel, grid_size(B * NH_LOC_HID), BLOCK_SIZE, 0, stream)(
         a->loc_grad.data, grad_concat.data, B, NH_CONCAT, 0, NH_LOC_HID);
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_LOC_HID, NH_LOC_HID), BLOCK_SIZE, NH_LOC_HID * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_LOC_HID, NH_LOC_HID), BLOCK_SIZE, NH_LOC_HID * sizeof(long long), stream)(
         a->loc_grad.data, a->loc_out.data, bacc + H, (int64_t)B * NH_LOC_HID, NH_LOC_HID);
     Prec locg = {.data = a->loc_grad.data, .shape = {B, NH_LOC_HID}};
     // second layer: dW2 = dout^T h1, dh1 = dout W2 (in place over h1 after wgrad), relu mask + own bias acc
@@ -2118,9 +2269,9 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
     Prec dh1 = {.data = a->loc_h1_grad.data, .shape = {B, NH_LOC_H1}};
     puf_mm_nn(&locg, &ew->loc2_w, &dh1, stream);
     cudaMemsetAsync(a->loc1b_acc.data, 0, NH_LOC_H1 * sizeof(long long), stream);
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_LOC_H1, NH_LOC_H1), BLOCK_SIZE, NH_LOC_H1 * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_LOC_H1, NH_LOC_H1), BLOCK_SIZE, NH_LOC_H1 * sizeof(long long), stream)(
         dh1.data, a->loc_h1.data, (long long*)a->loc1b_acc.data, (int64_t)B * NH_LOC_H1, NH_LOC_H1);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_LOC_H1), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_LOC_H1), BLOCK_SIZE, 0, stream)(
         a->loc_bgrad.data, (long long*)a->loc1b_acc.data, NH_LOC_H1);
     puf_mm_tn(&dh1, &a->x_local, &a->loc_wgrad, stream);
     Prec dx_local = {.data = a->x_local.data, .shape = {B, NH_LOC_IN}};
@@ -2128,9 +2279,9 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
 
     // Global view: relu mask + b2 grad, then the fused max backward (dW2 via
     // fixed-point staging, dt16 overwrites t16), then b1's column sum.
-    nh_slice_kernel<<<grid_size(B * NH_GLB_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_slice_kernel, grid_size(B * NH_GLB_HID), BLOCK_SIZE, 0, stream)(
         a->glb_grad.data, grad_concat.data, B, NH_CONCAT, NH_LOC_HID, NH_GLB_HID);
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_GLB_HID, NH_GLB_HID), BLOCK_SIZE, NH_GLB_HID * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_GLB_HID, NH_GLB_HID), BLOCK_SIZE, NH_GLB_HID * sizeof(long long), stream)(
         a->glb_grad.data, a->glb_out.data, bacc + H + NH_LOC_HID, (int64_t)B * NH_GLB_HID, NH_GLB_HID);
     // terrain MLP backward: features are inputs (no grad past terr_tf); the
     // bacc glb2 slot above carries terr2_b's grad.
@@ -2139,9 +2290,9 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
       Prec tdh = {.data = a->terr_dh.data, .shape = {B, NH_TERR_H1}};
       puf_mm_nn(&glbg, &ew->terr2_w, &tdh, stream);
       cudaMemsetAsync(a->terr1b_acc.data, 0, NH_TERR_H1 * sizeof(long long), stream);
-      nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_TERR_H1, NH_TERR_H1), BLOCK_SIZE, NH_TERR_H1 * sizeof(long long), stream>>>(
+      PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_TERR_H1, NH_TERR_H1), BLOCK_SIZE, NH_TERR_H1 * sizeof(long long), stream)(
           tdh.data, a->terr_h.data, (long long*)a->terr1b_acc.data, (int64_t)B * NH_TERR_H1, NH_TERR_H1);
-      nh_fxp_to_precision_kernel<<<grid_size(NH_TERR_H1), BLOCK_SIZE, 0, stream>>>(
+      PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_TERR_H1), BLOCK_SIZE, 0, stream)(
           a->terr1_bgrad.data, (long long*)a->terr1b_acc.data, NH_TERR_H1);
       puf_mm_tn(&tdh, &a->terr_tf, &a->terr1_wgrad, stream); }
 
@@ -2154,23 +2305,23 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
     // (mirrors the max-bwd's write-all contract); wield readout adds next.
     cudaMemsetAsync(a->mv1b_acc.data, 0, NH_MV * sizeof(long long), stream);
     cudaMemsetAsync(a->mv2b_acc.data, 0, NH_MV * sizeof(long long), stream);
-    nh_min_dv_kernel<<<grid_size((int64_t)B * NH_INV * NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_dv_kernel, grid_size((int64_t)B * NH_INV * NH_MV), BLOCK_SIZE, 0, stream)(
         a->mdv.data, grad_concat.data, a->mvmax.data, a->inv_idx.data,
         0.2f, NH_INV, NH_PAD_GLYPH, NH_MINV_OFF, B);
-    NH_ENT_LAST_BWD<<<nh_colsum_grid((int64_t)B * NH_INV * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream>>>(
+    NH_LAUNCH(NH_ENT_LAST_BWD, nh_colsum_grid((int64_t)B * NH_INV * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream)(
         a->mdv.data, a->mvv.data, (long long*)a->mv2b_acc.data,
         (int64_t)B * NH_INV * NH_MV, NH_MV);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_MV), BLOCK_SIZE, 0, stream)(
         a->mv2_bgrad.data, (long long*)a->mv2b_acc.data, NH_MV);
     { Prec dvf = {.data = a->mdv.data, .shape = {B * NH_INV, NH_MV}};
       Prec h1f = {.data = a->mh1.data, .shape = {B * NH_INV, NH_MV}};
       puf_mm_tn(&dvf, &h1f, &a->mv2_wgrad, stream);
       Prec dh1f = {.data = a->mdh1.data, .shape = {B * NH_INV, NH_MV}};
       puf_mm_nn(&dvf, &ew->mv2_w, &dh1f, stream); }
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_INV * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_INV * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream)(
         a->mdh1.data, a->mh1.data, (long long*)a->mv1b_acc.data,
         (int64_t)B * NH_INV * NH_MV, NH_MV);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_MV), BLOCK_SIZE, 0, stream)(
         a->mv1_bgrad.data, (long long*)a->mv1b_acc.data, NH_MV);
     { Prec dh1f = {.data = a->mdh1.data, .shape = {B * NH_INV, NH_MV}};
       Prec invf = {.data = a->inv_out.data, .shape = {B * NH_INV, NH_INV_HID}};
@@ -2178,22 +2329,22 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
       Prec dinvf = {.data = a->inv_grad.data, .shape = {B * NH_INV, NH_INV_HID}};
       puf_mm_nn(&dh1f, &ew->mv1_w, &dinvf, stream); } // FIRST writer of inv_grad
 #ifdef NH_NOPASS
-    nh_passbwd_kernel<<<grid_size((int64_t)B * NH_INV * NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_passbwd_kernel, grid_size((int64_t)B * NH_INV * NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->inv_grad.data, grad_concat.data, a->inv_sfeat.data, a->inv_idx.data,
         7, NH_MINV_OFF + 2 * NH_MV, B);
 #else
-    nh_passbwd_kernel<<<grid_size((int64_t)B * NH_INV * NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_passbwd_kernel, grid_size((int64_t)B * NH_INV * NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->inv_grad.data, grad_concat.data, a->inv_sfeat.data, a->inv_idx.data,
         0, NH_MINV_OFF + 2 * NH_MV, B);
 #endif
     // pointer-decoder key grads: second consumer of inv_out, summed before
     // the relu mask (both paths read the post-relu slot vectors)
     if (nh_ptr_keygrad != NULL)
-        nh_add_inplace_kernel<<<grid_size(B * NH_INV_FLAT), BLOCK_SIZE, 0, stream>>>(
+        PUF_LAUNCH(nh_add_inplace_kernel, grid_size(B * NH_INV_FLAT), BLOCK_SIZE, 0, stream)(
             a->inv_grad.data, nh_ptr_keygrad->data, B * NH_INV_FLAT);
     // attention tail: third consumer of inv_out, also pre-relu-mask
     // no encoder attention under MIN
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_INV_FLAT, NH_INV_HID), BLOCK_SIZE, NH_INV_HID * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_INV_FLAT, NH_INV_HID), BLOCK_SIZE, NH_INV_HID * sizeof(long long), stream)(
         a->inv_grad.data, a->inv_out.data, bacc + H + NH_LOC_HID + NH_GLB_HID + NH_BL_HID + NH_BACC_GLB1,
         (int64_t)B * NH_INV_FLAT, NH_INV_HID);
     // state-path weight grad: dW_s = dslot^T @ sfeat over the B*55 slot rows
@@ -2201,23 +2352,23 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
     Prec sfflat = {.data = a->inv_sfeat.data, .shape = {B * NH_INV, NH_SFEAT}};
     puf_mm_tn(&dsflat, &sfflat, &a->inv1s_wgrad, stream);
     cudaMemsetAsync(a->dTinv_i.data, 0, (size_t)NH_ITBL * NH_INV_HID * sizeof(long long), stream);
-    nh_dTinv_scatter_kernel<<<grid_size((int64_t)B * NH_INV_FLAT), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_dTinv_scatter_kernel, grid_size((int64_t)B * NH_INV_FLAT), BLOCK_SIZE, 0, stream)(
         (long long*)a->dTinv_i.data, a->inv_grad.data, a->inv_idx.data, (int64_t)B * NH_INV_FLAT, 0);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_GLYPH_VOCAB * NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_GLYPH_VOCAB * NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->dTinv.data, (long long*)a->dTinv_i.data, NH_ITBL * NH_INV_HID);
     puf_mm_tn(&a->dTinv, &a->e_eff, &a->inv1_wgrad, stream);
     // discovered-type channel: same fused-table backward keyed by true glyph
     cudaMemsetAsync(a->dTtrue_i.data, 0, (size_t)NH_ITBL * NH_INV_HID * sizeof(long long), stream);
-    nh_dTinv_scatter_kernel<<<grid_size((int64_t)B * NH_INV_FLAT), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_dTinv_scatter_kernel, grid_size((int64_t)B * NH_INV_FLAT), BLOCK_SIZE, 0, stream)(
         (long long*)a->dTtrue_i.data, a->inv_grad.data, a->invt_idx.data, (int64_t)B * NH_INV_FLAT, 1);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_GLYPH_VOCAB * NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_GLYPH_VOCAB * NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->dTtrue.data, (long long*)a->dTtrue_i.data, NH_ITBL * NH_INV_HID);
     puf_mm_tn(&a->dTtrue, &a->e_eff, &a->invt_wgrad, stream);
 
     // Blstats branch (raw-feature slice of concat has no upstream params)
-    nh_slice_kernel<<<grid_size(B * NH_BL_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_slice_kernel, grid_size(B * NH_BL_HID), BLOCK_SIZE, 0, stream)(
         a->bl_grad.data, grad_concat.data, B, NH_CONCAT, NH_LOC_HID + NH_GLB_HID + NH_INVP_DIM, NH_BL_HID);
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_BL_HID, NH_BL_HID), BLOCK_SIZE, NH_BL_HID * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_BL_HID, NH_BL_HID), BLOCK_SIZE, NH_BL_HID * sizeof(long long), stream)(
         a->bl_grad.data, a->bl_out.data, bacc + H + NH_LOC_HID + NH_GLB_HID, (int64_t)B * NH_BL_HID, NH_BL_HID);
     Prec blg = {.data = a->bl_grad.data, .shape = {B, NH_BL_HID}};
     puf_mm_tn(&blg, &a->bl_feats, &a->bl_wgrad, stream);
@@ -2226,9 +2377,9 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
     // grad (fixed-point). Reads its grad straight off the concat-grad slice;
     // ids saved from the forward, so no obs re-read.
     cudaMemsetAsync(a->dmsg_acc.data, 0, (size_t)NH_MSG_VOCAB * NH_MSG_HID * sizeof(long long), stream);
-    nh_msg_bwd_kernel<<<B, NH_MSG_HID, 0, stream>>>(
+    PUF_LAUNCH(nh_msg_bwd_kernel, B, NH_MSG_HID, 0, stream)(
         (long long*)a->dmsg_acc.data, grad_concat.data, a->msg_ids.data, B);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_MSG_VOCAB * NH_MSG_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_MSG_VOCAB * NH_MSG_HID), BLOCK_SIZE, 0, stream)(
         a->msg_wgrad.data, (long long*)a->dmsg_acc.data, NH_MSG_VOCAB * NH_MSG_HID);
 
     // Global branch to the embed table + glb1: scatter dt16 occurrences into
@@ -2239,96 +2390,96 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
     int dE_n = NH_GLYPH_VOCAB * NH_EMBED_DIM;
     // class-crop backward: dx_local scatters into the 9x8 class table only
     cudaMemsetAsync(a->locc_acc.data, 0, NH_LOCC_CLASSES * NH_LOCC_DIM * sizeof(long long), stream);
-    nh_loc3_scatter_kernel<<<grid_size((int64_t)B * NH_LOC_IN), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_loc3_scatter_kernel, grid_size((int64_t)B * NH_LOC_IN), BLOCK_SIZE, 0, stream)(
         (long long*)a->locc_acc.data, dx_local.data, a->crop_glyph.data, nh_locc_lut_dev, B);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_LOCC_CLASSES * NH_LOCC_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_LOCC_CLASSES * NH_LOCC_DIM), BLOCK_SIZE, 0, stream)(
         a->locc_wgrad.data, (long long*)a->locc_acc.data, NH_LOCC_CLASSES * NH_LOCC_DIM);
 
     // Inventory branch adds its embed grads last: dE += dT_inv @ inv1_w.
     puf_mm_nn(&a->dTinv, &ew->inv1_w, &a->dE_tmp, stream);
-    nh_add_inplace_kernel<<<grid_size(dE_n), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_add_inplace_kernel, grid_size(dE_n), BLOCK_SIZE, 0, stream)(
         a->embed_wgrad.data, a->dE_tmp.data, dE_n);
     // ...and the discovered-type channel's: dE += dT_true @ invt_w.
     puf_mm_nn(&a->dTtrue, &ew->invt_w, &a->dE_tmp, stream);
-    nh_add_inplace_kernel<<<grid_size(dE_n), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_add_inplace_kernel, grid_size(dE_n), BLOCK_SIZE, 0, stream)(
         a->embed_wgrad.data, a->dE_tmp.data, dE_n);
 
     // spell-embed channel: scatter its concat-grad slice into dE (reuse dE_i)
     cudaMemsetAsync(a->dE_i.data, 0, (size_t)NH_GLYPH_VOCAB * NH_EMBED_DIM * sizeof(long long), stream);
     // spell block backward: dv (sum+max routing) -> MLP chain -> trunk dkeys
     // staged into spk_dkeys, then pointer grads added + key relu gate.
-    nh_min_dv_kernel<<<grid_size((int64_t)B * NH_SPELL_SLOTS * NH_SPM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_dv_kernel, grid_size((int64_t)B * NH_SPELL_SLOTS * NH_SPM), BLOCK_SIZE, 0, stream)(
         a->spdv.data, grad_concat.data, a->spvmax.data, a->spell_idx.data,
         0.25f, NH_SPELL_SLOTS, -1, NH_SPELL_CONCAT_OFF, B);
     cudaMemsetAsync(a->spm1b_acc.data, 0, NH_SPM * sizeof(long long), stream);
     cudaMemsetAsync(a->spm2b_acc.data, 0, NH_SPM * sizeof(long long), stream);
-    NH_ENT_LAST_BWD<<<nh_colsum_grid((int64_t)B * NH_SPELL_SLOTS * NH_SPM, NH_SPM), BLOCK_SIZE, NH_SPM * sizeof(long long), stream>>>(
+    NH_LAUNCH(NH_ENT_LAST_BWD, nh_colsum_grid((int64_t)B * NH_SPELL_SLOTS * NH_SPM, NH_SPM), BLOCK_SIZE, NH_SPM * sizeof(long long), stream)(
         a->spdv.data, a->spv.data, (long long*)a->spm2b_acc.data,
         (int64_t)B * NH_SPELL_SLOTS * NH_SPM, NH_SPM);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_SPM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_SPM), BLOCK_SIZE, 0, stream)(
         a->spm2_bgrad.data, (long long*)a->spm2b_acc.data, NH_SPM);
     { Prec dvf = {.data = a->spdv.data, .shape = {B * NH_SPELL_SLOTS, NH_SPM}};
       Prec hf = {.data = a->sph1.data, .shape = {B * NH_SPELL_SLOTS, NH_SPM}};
       puf_mm_tn(&dvf, &hf, &a->spm2_wgrad, stream);
       Prec dhf = {.data = a->spdh1.data, .shape = {B * NH_SPELL_SLOTS, NH_SPM}};
       puf_mm_nn(&dvf, &ew->spm2_w, &dhf, stream); }
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_SPELL_SLOTS * NH_SPM, NH_SPM), BLOCK_SIZE, NH_SPM * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_SPELL_SLOTS * NH_SPM, NH_SPM), BLOCK_SIZE, NH_SPM * sizeof(long long), stream)(
         a->spdh1.data, a->sph1.data, (long long*)a->spm1b_acc.data,
         (int64_t)B * NH_SPELL_SLOTS * NH_SPM, NH_SPM);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_SPM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_SPM), BLOCK_SIZE, 0, stream)(
         a->spm1_bgrad.data, (long long*)a->spm1b_acc.data, NH_SPM);
     { Prec dhf = {.data = a->spdh1.data, .shape = {B * NH_SPELL_SLOTS, NH_SPM}};
       Prec kf = {.data = a->spk_keys.data, .shape = {B * NH_SPELL_SLOTS, NH_SPKEY}};
       puf_mm_tn(&dhf, &kf, &a->spm1_wgrad, stream);
       Prec dkf = {.data = a->spk_dkeys.data, .shape = {B * NH_SPELL_SLOTS, NH_SPKEY}};
       puf_mm_nn(&dhf, &ew->spm1_w, &dkf, stream); } // trunk dkeys, FIRST writer
-    nh_sp2_dk_kernel<<<grid_size(B * NH_SPELL_SLOTS * NH_SPKEY), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_sp2_dk_kernel, grid_size(B * NH_SPELL_SLOTS * NH_SPKEY), BLOCK_SIZE, 0, stream)(
         a->spk_dkeys.data, nh_ptr_spkeygrad != NULL ? nh_ptr_spkeygrad->data : NULL,
         a->spk_keys.data, B);
-    nh_spkey_dE_kernel<<<grid_size(B * NH_SPELL_SLOTS * NH_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_spkey_dE_kernel, grid_size(B * NH_SPELL_SLOTS * NH_EMBED_DIM), BLOCK_SIZE, 0, stream)(
         (long long*)a->dE_i.data, a->spk_dkeys.data, ew->spk_w.data, a->spell_idx.data, B);
     { Prec dkf = {.data = a->spk_dkeys.data, .shape = {B * NH_SPELL_SLOTS, NH_SPKEY}};
       Prec inf = {.data = a->spk_in.data, .shape = {B * NH_SPELL_SLOTS, NH_SPIN}};
       puf_mm_tn(&dkf, &inf, &a->spk_wgrad, stream); }
-    nh_fxp_to_precision_kernel<<<grid_size(NH_GLYPH_VOCAB * NH_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_GLYPH_VOCAB * NH_EMBED_DIM), BLOCK_SIZE, 0, stream)(
         a->dE_tmp.data, (long long*)a->dE_i.data, NH_GLYPH_VOCAB * NH_EMBED_DIM);
-    nh_add_inplace_kernel<<<grid_size(dE_n), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_add_inplace_kernel, grid_size(dE_n), BLOCK_SIZE, 0, stream)(
         a->embed_wgrad.data, a->dE_tmp.data, dE_n);
     { // typed stream backward: pool -> score/value grads -> shared-embed scatter
     // monster stream
     cudaMemsetAsync(a->mrb_acc.data, 0, NH_INV_HID * sizeof(long long), stream);
     cudaMemsetAsync(a->mm1b_acc.data, 0, NH_MV * sizeof(long long), stream);
     cudaMemsetAsync(a->mm2b_acc.data, 0, NH_MV * sizeof(long long), stream);
-    nh_min_dv_kernel<<<grid_size((int64_t)B * NH_LABK * NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_dv_kernel, grid_size((int64_t)B * NH_LABK * NH_MV), BLOCK_SIZE, 0, stream)(
         a->mdvm.data, grad_concat.data, a->mvmaxm.data, a->lm_gid.data,
         0.25f, NH_LABK, -1, NH_MLM_OFF, B);
-    NH_ENT_LAST_BWD<<<nh_colsum_grid((int64_t)B * NH_LABK * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream>>>(
+    NH_LAUNCH(NH_ENT_LAST_BWD, nh_colsum_grid((int64_t)B * NH_LABK * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream)(
         a->mdvm.data, a->mvm.data, (long long*)a->mm2b_acc.data,
         (int64_t)B * NH_LABK * NH_MV, NH_MV);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_MV), BLOCK_SIZE, 0, stream)(
         a->mm2_bgrad.data, (long long*)a->mm2b_acc.data, NH_MV);
     { Prec dvf = {.data = a->mdvm.data, .shape = {B * NH_LABK, NH_MV}};
       Prec h1f = {.data = a->mh1m.data, .shape = {B * NH_LABK, NH_MV}};
       puf_mm_tn(&dvf, &h1f, &a->mm2_wgrad, stream);
       Prec dh1f = {.data = a->mdh1m.data, .shape = {B * NH_LABK, NH_MV}};
       puf_mm_nn(&dvf, &ew->mm2_w, &dh1f, stream); }
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_LABK * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_LABK * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream)(
         a->mdh1m.data, a->mh1m.data, (long long*)a->mm1b_acc.data,
         (int64_t)B * NH_LABK * NH_MV, NH_MV);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_MV), BLOCK_SIZE, 0, stream)(
         a->mm1_bgrad.data, (long long*)a->mm1b_acc.data, NH_MV);
     { Prec dh1f = {.data = a->mdh1m.data, .shape = {B * NH_LABK, NH_MV}};
       Prec rpf = {.data = a->mrp.data, .shape = {B * NH_LABK, NH_INV_HID}};
       puf_mm_tn(&dh1f, &rpf, &a->mm1_wgrad, stream);
       Prec drpf = {.data = a->mdrp.data, .shape = {B * NH_LABK, NH_INV_HID}};
       puf_mm_nn(&dh1f, &ew->mm1_w, &drpf, stream); } // FIRST writer of mdrp
-    nh_min_sgate_bwd_kernel<<<grid_size(B * NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_sgate_bwd_kernel, grid_size(B * NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->mdrp.data, grad_concat.data, a->lm_tok.data, a->lm_gid.data,
         0, NH_MLM_OFF + 2 * NH_MV, B);
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_LABK * NH_INV_HID, NH_INV_HID), BLOCK_SIZE, NH_INV_HID * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_LABK * NH_INV_HID, NH_INV_HID), BLOCK_SIZE, NH_INV_HID * sizeof(long long), stream)(
         a->mdrp.data, a->mrp.data, (long long*)a->mrb_acc.data,
         (int64_t)B * NH_LABK * NH_INV_HID, NH_INV_HID);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->mr_bgrad.data, (long long*)a->mrb_acc.data, NH_INV_HID);
     Prec mtokf = {.data = a->lm_tok.data, .shape = {B * NH_LABK, NH_LAB_IN}};
     { Prec drpf = {.data = a->mdrp.data, .shape = {B * NH_LABK, NH_INV_HID}};
@@ -2339,36 +2490,36 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
     cudaMemsetAsync(a->irb_acc.data, 0, NH_INV_HID * sizeof(long long), stream);
     cudaMemsetAsync(a->im1b_acc.data, 0, NH_MV * sizeof(long long), stream);
     cudaMemsetAsync(a->im2b_acc.data, 0, NH_MV * sizeof(long long), stream);
-    nh_min_dv_kernel<<<grid_size((int64_t)B * NH_LABK * NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_dv_kernel, grid_size((int64_t)B * NH_LABK * NH_MV), BLOCK_SIZE, 0, stream)(
         a->mdvi.data, grad_concat.data, a->mvmaxi.data, a->li_gid.data,
         0.25f, NH_LABK, -1, NH_MLI_OFF, B);
-    NH_ENT_LAST_BWD<<<nh_colsum_grid((int64_t)B * NH_LABK * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream>>>(
+    NH_LAUNCH(NH_ENT_LAST_BWD, nh_colsum_grid((int64_t)B * NH_LABK * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream)(
         a->mdvi.data, a->mvi.data, (long long*)a->im2b_acc.data,
         (int64_t)B * NH_LABK * NH_MV, NH_MV);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_MV), BLOCK_SIZE, 0, stream)(
         a->im2_bgrad.data, (long long*)a->im2b_acc.data, NH_MV);
     { Prec dvf = {.data = a->mdvi.data, .shape = {B * NH_LABK, NH_MV}};
       Prec h1f = {.data = a->mh1i.data, .shape = {B * NH_LABK, NH_MV}};
       puf_mm_tn(&dvf, &h1f, &a->im2_wgrad, stream);
       Prec dh1f = {.data = a->mdh1i.data, .shape = {B * NH_LABK, NH_MV}};
       puf_mm_nn(&dvf, &ew->im2_w, &dh1f, stream); }
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_LABK * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_LABK * NH_MV, NH_MV), BLOCK_SIZE, NH_MV * sizeof(long long), stream)(
         a->mdh1i.data, a->mh1i.data, (long long*)a->im1b_acc.data,
         (int64_t)B * NH_LABK * NH_MV, NH_MV);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_MV), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_MV), BLOCK_SIZE, 0, stream)(
         a->im1_bgrad.data, (long long*)a->im1b_acc.data, NH_MV);
     { Prec dh1f = {.data = a->mdh1i.data, .shape = {B * NH_LABK, NH_MV}};
       Prec rpf = {.data = a->irp.data, .shape = {B * NH_LABK, NH_INV_HID}};
       puf_mm_tn(&dh1f, &rpf, &a->im1_wgrad, stream);
       Prec drpf = {.data = a->idrp.data, .shape = {B * NH_LABK, NH_INV_HID}};
       puf_mm_nn(&dh1f, &ew->im1_w, &drpf, stream); } // FIRST writer of idrp
-    nh_min_sgate_bwd_kernel<<<grid_size(B * NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_min_sgate_bwd_kernel, grid_size(B * NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->idrp.data, grad_concat.data, a->li_tok.data, a->li_gid.data,
         1, NH_MLI_OFF + 2 * NH_MV, B);
-    nh_relu_bias_bwd_kernel<<<nh_colsum_grid((int64_t)B * NH_LABK * NH_INV_HID, NH_INV_HID), BLOCK_SIZE, NH_INV_HID * sizeof(long long), stream>>>(
+    PUF_LAUNCH(nh_relu_bias_bwd_kernel, nh_colsum_grid((int64_t)B * NH_LABK * NH_INV_HID, NH_INV_HID), BLOCK_SIZE, NH_INV_HID * sizeof(long long), stream)(
         a->idrp.data, a->irp.data, (long long*)a->irb_acc.data,
         (int64_t)B * NH_LABK * NH_INV_HID, NH_INV_HID);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_INV_HID), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_INV_HID), BLOCK_SIZE, 0, stream)(
         a->ir_bgrad.data, (long long*)a->irb_acc.data, NH_INV_HID);
     Prec itokf = {.data = a->li_tok.data, .shape = {B * NH_LABK, NH_LAB_IN}};
     { Prec drpf = {.data = a->idrp.data, .shape = {B * NH_LABK, NH_INV_HID}};
@@ -2378,25 +2529,25 @@ static void nethack_encoder_backward(void* w, void* activations, Prec grad, cuda
     // shared-embed scatter: value-path dtok (in tok buffers) + score-path
     // dtok (dts buffers) for both streams, then one flush + add
     cudaMemsetAsync(a->dE_i.data, 0, (size_t)NH_GLYPH_VOCAB * NH_EMBED_DIM * sizeof(long long), stream);
-    nh_lab_dE_scatter_kernel<<<grid_size(B * NH_LABK * NH_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_lab_dE_scatter_kernel, grid_size(B * NH_LABK * NH_EMBED_DIM), BLOCK_SIZE, 0, stream)(
         (long long*)a->dE_i.data, a->lm_tok.data, a->lm_gid.data, B);
-    nh_lab_dE_scatter_kernel<<<grid_size(B * NH_LABK * NH_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_lab_dE_scatter_kernel, grid_size(B * NH_LABK * NH_EMBED_DIM), BLOCK_SIZE, 0, stream)(
         (long long*)a->dE_i.data, a->li_tok.data, a->li_gid.data, B);
-    nh_fxp_to_precision_kernel<<<grid_size(NH_GLYPH_VOCAB * NH_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, grid_size(NH_GLYPH_VOCAB * NH_EMBED_DIM), BLOCK_SIZE, 0, stream)(
         a->dE_tmp.data, (long long*)a->dE_i.data, NH_GLYPH_VOCAB * NH_EMBED_DIM);
-    nh_add_inplace_kernel<<<grid_size(dE_n), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_add_inplace_kernel, grid_size(dE_n), BLOCK_SIZE, 0, stream)(
         a->embed_wgrad.data, a->dE_tmp.data, dE_n);
     }
 
 
     // dE_eff complete: embed_wgrad doubles as dE_res (identity path); factor
     // tables get deterministic CSR row sums of the same buffer
-    nh_ekind_grad_kernel<<<grid_size(NH_NKIND * NH_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_ekind_grad_kernel, grid_size(NH_NKIND * NH_EMBED_DIM), BLOCK_SIZE, 0, stream)(
         a->ekind_wgrad.data, a->embed_wgrad.data);
-    nh_esub_grad_kernel<<<grid_size(NH_NSUB * NH_EMBED_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_esub_grad_kernel, grid_size(NH_NSUB * NH_EMBED_DIM), BLOCK_SIZE, 0, stream)(
         a->esub_wgrad.data, a->embed_wgrad.data);
 
-    nh_bias_flush_kernel<<<grid_size(H + NH_LOC_HID + NH_GLB_HID + NH_BL_HID + NH_BACC_GLB1 + NH_INV_HID + NH_BACC_INVP), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_bias_flush_kernel, grid_size(H + NH_LOC_HID + NH_GLB_HID + NH_BL_HID + NH_BACC_GLB1 + NH_INV_HID + NH_BACC_INVP), BLOCK_SIZE, 0, stream)(
         bacc, a->proj_bgrad.data, H,
         a->loc2_bgrad.data,
         NH_LOC_HID,
@@ -2443,13 +2594,12 @@ static void nethack_encoder_init_weights(void* w, uint64_t* seed, cudaStream_t s
             fclose(mf);
             float* md; cudaMalloc(&md, mn * sizeof(float));
             cudaMemcpyAsync(md, mh, mn * sizeof(float), cudaMemcpyHostToDevice, stream);
-            nh_f32_to_precision_kernel<<<grid_size((int)mn), BLOCK_SIZE, 0, stream>>>(ew->msg_w.data, md, (int)mn);
+            PUF_LAUNCH(nh_f32_to_precision_kernel, grid_size((int)mn), BLOCK_SIZE, 0, stream)(ew->msg_w.data, md, (int)mn);
             cudaStreamSynchronize(stream); cudaFree(md); free(mh);
             fprintf(stderr, "NH_MSG_INIT: loaded %s (%zu values)\n", mp, mn);
         }
 #ifdef NH_MSG_FROZEN
-        if (!nh_msg_w0_dev) cudaMalloc(&nh_msg_w0_dev, mn * sizeof(precision_t));
-        cudaMemcpyAsync(nh_msg_w0_dev, ew->msg_w.data, mn * sizeof(precision_t), cudaMemcpyDeviceToDevice, stream);
+        nethack_refresh_weight_cache(w, stream);
 #endif
     }
     puf_kaiming_init(&ew->spk_w, 1.0f, (*seed)++, stream); // spell slot-rep projection
@@ -2887,6 +3037,7 @@ struct NethackDecoderActivations {
     Prec lin_wgrad, q_wgrad, k_wgrad, tau_grad;
 };
 
+#ifndef PUF_METAL
 __global__ void nh_dec_assemble_kernel(precision_t* __restrict__ out,
     const precision_t* __restrict__ tmp, const precision_t* __restrict__ slot_logits,
     const precision_t* __restrict__ q, const precision_t* __restrict__ spkeys, int B) {
@@ -2912,9 +3063,11 @@ __global__ void nh_dec_assemble_kernel(precision_t* __restrict__ out,
         v = to_float(tmp[(int64_t)b * NH_DEC_PAD + NH_DEC_LIN - 1]);
     out[idx] = from_float(v);
 }
+#endif  // PUF_METAL
 
 // L2 norm (+eps) of each 32-dim row; runs over queries (B*NH_HEADS rows) and
 // projected keys (B*NH_INV rows)
+#ifndef PUF_METAL
 __global__ void nh_ptr_rownorm_kernel(precision_t* __restrict__ n,
     const precision_t* __restrict__ rows, int total) {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2926,10 +3079,12 @@ __global__ void nh_ptr_rownorm_kernel(precision_t* __restrict__ n,
     }
     n[r] = from_float(sqrtf(acc) + 1e-6f);
 }
+#endif  // PUF_METAL
 
 // slot logit = exp(ltau_h) * (qhat_h . k_i): query-only normalization — key
 // magnitude reaches the logit (decoder lab: composite gear selection +3..21pp
 // vs full cosine; adopted 2026-08-25, pair +386). One thread per (b, head, slot).
+#ifndef PUF_METAL
 __global__ void nh_ptr3_cos_kernel(precision_t* __restrict__ slot_logits,
     const precision_t* __restrict__ q, const precision_t* __restrict__ qn,
     const precision_t* __restrict__ kmat,
@@ -2946,7 +3101,9 @@ __global__ void nh_ptr3_cos_kernel(precision_t* __restrict__ slot_logits,
     slot_logits[idx] = from_float(expf(to_float(tau[h])) * dot /
         to_float(qn[(int64_t)b * NH_QHEADS + h]));
 }
+#endif  // PUF_METAL
 
+#ifndef PUF_METAL
 __global__ void nh_dec_dtmp_kernel(precision_t* __restrict__ dtmp,
     const precision_t* __restrict__ g, int B) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2962,10 +3119,12 @@ __global__ void nh_dec_dtmp_kernel(precision_t* __restrict__ dtmp,
             : NH_DEC_OD;
     dtmp[idx] = g[(int64_t)b * (NH_DEC_OD + 1) + src];
 }
+#endif  // PUF_METAL
 
 // dltau_h (fxp scalar, chain rule: dL/dltau = tau * sum g cos) + dv = tau *
 // sum_i g_hi * u_i (u = normalized key); dq_h = (dv - v (v.dv)) / ||q_h||,
 // per (sample, head) with sequential loops.
+#ifndef PUF_METAL
 __global__ void nh_ptr3_dq_kernel(precision_t* __restrict__ dq,
     long long* __restrict__ tau_acc, const precision_t* __restrict__ g,
     const precision_t* __restrict__ out, const precision_t* __restrict__ q,
@@ -2999,10 +3158,12 @@ __global__ void nh_ptr3_dq_kernel(precision_t* __restrict__ dq,
         dq[qrow * NH_INV_HID + k] = from_float((dv[k] - vhat[k] * vdv) / qnv);
     if (dtau != 0.0f) nh_fxp_atomic_add(&tau_acc[h], dtau * tauv);
 }
+#endif  // PUF_METAL
 
 // spell head backward (dot-product pointer): dq_spell = 0.25 sum_s g_s k_s,
 // spdk_s = 0.25 g_s q_spell (+ the pool grad, added encoder-side). Always
 // writes its dq row and all spdk entries (zeros when CAST saw no gradient).
+#ifndef PUF_METAL
 __global__ void nh_spq_bwd_kernel(precision_t* __restrict__ dq,
     precision_t* __restrict__ spdk, const precision_t* __restrict__ g,
     const precision_t* __restrict__ q, const precision_t* __restrict__ spkeys, int B) {
@@ -3019,8 +3180,10 @@ __global__ void nh_spq_bwd_kernel(precision_t* __restrict__ dq,
     }
     dq[qrow + k] = from_float(dqk);
 }
+#endif  // PUF_METAL
 
 // dk_i = sum_h tau_h * g_hi * (v_h - u_i * cos_hi) / ||k_i||
+#ifndef PUF_METAL
 __global__ void nh_ptr3_dkmat_kernel(precision_t* __restrict__ dkmat,
     const precision_t* __restrict__ g, const precision_t* __restrict__ out,
     const precision_t* __restrict__ q, const precision_t* __restrict__ qn,
@@ -3044,6 +3207,7 @@ __global__ void nh_ptr3_dkmat_kernel(precision_t* __restrict__ dkmat,
     }
     dkmat[idx] = from_float(acc);
 }
+#endif  // PUF_METAL
 
 
 static Prec nethack_decoder_forward(void* w, void* activations, Prec input, cudaStream_t stream) {
@@ -3057,11 +3221,11 @@ static Prec nethack_decoder_forward(void* w, void* activations, Prec input, cuda
     Prec sflat = {.data = ea->inv_out.data, .shape = {B * NH_INV, NH_INV_HID}};
     Prec kflat = {.data = a->kmat.data, .shape = {B * NH_INV, NH_INV_HID}};
     puf_mm(&sflat, &dw->k_w, &kflat, stream);
-    nh_ptr_rownorm_kernel<<<grid_size(B * NH_QHEADS), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_ptr_rownorm_kernel, grid_size(B * NH_QHEADS), BLOCK_SIZE, 0, stream)(
         a->qn.data, a->q.data, B * NH_QHEADS);
-    nh_ptr3_cos_kernel<<<grid_size(B * NH_SLOT_OD), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_ptr3_cos_kernel, grid_size(B * NH_SLOT_OD), BLOCK_SIZE, 0, stream)(
         a->slot_logits.data, a->q.data, a->qn.data, a->kmat.data, dw->tau.data, B);
-    nh_dec_assemble_kernel<<<grid_size(B * (NH_DEC_OD + 1)), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_dec_assemble_kernel, grid_size(B * (NH_DEC_OD + 1)), BLOCK_SIZE, 0, stream)(
         a->out.data, a->tmp.data, a->slot_logits.data, a->q.data, ea->spk_keys.data, B);
     return a->out;
 }
@@ -3073,19 +3237,19 @@ static Prec nethack_decoder_backward(void* w, void* activations,
     NethackDecoderActivations* a = (NethackDecoderActivations*)activations;
     int B = a->saved_input.shape[0];
     NethackEncoderActivations* ea = a->enc;
-    assemble_decoder_grad<<<grid_size(B * (NH_DEC_OD + 1)), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(assemble_decoder_grad, grid_size(B * (NH_DEC_OD + 1)), BLOCK_SIZE, 0, stream)(
         a->grad_out.data, grad_logits.data, grad_value.data, B, NH_DEC_OD, NH_DEC_OD + 1);
-    nh_dec_dtmp_kernel<<<grid_size(B * NH_DEC_PAD), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_dec_dtmp_kernel, grid_size(B * NH_DEC_PAD), BLOCK_SIZE, 0, stream)(
         a->dtmp.data, a->grad_out.data, B);
     cudaMemsetAsync(a->tau_acc.data, 0, NH_TAU_PAD * sizeof(long long), stream);
-    nh_ptr3_dq_kernel<<<grid_size(B * NH_HEADS), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_ptr3_dq_kernel, grid_size(B * NH_HEADS), BLOCK_SIZE, 0, stream)(
         a->dq.data, (long long*)a->tau_acc.data, a->grad_out.data, a->out.data,
         a->q.data, a->qn.data, a->kmat.data, dw->tau.data, B);
-    nh_fxp_to_precision_kernel<<<1, 32, 0, stream>>>(
+    PUF_LAUNCH(nh_fxp_to_precision_kernel, 1, 32, 0, stream)(
         a->tau_grad.data, (long long*)a->tau_acc.data, NH_TAU_PAD);
-    nh_spq_bwd_kernel<<<grid_size(B * NH_SPKEY), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_spq_bwd_kernel, grid_size(B * NH_SPKEY), BLOCK_SIZE, 0, stream)(
         a->dq.data, a->spdk.data, a->grad_out.data, a->q.data, ea->spk_keys.data, B);
-    nh_ptr3_dkmat_kernel<<<grid_size((int64_t)B * NH_INV_FLAT), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_ptr3_dkmat_kernel, grid_size((int64_t)B * NH_INV_FLAT), BLOCK_SIZE, 0, stream)(
         a->dkmat.data, a->grad_out.data, a->out.data, a->q.data, a->qn.data,
         a->kmat.data, dw->tau.data, B);
     // dK = dkmat^T @ s ; keygrad (ds, into the encoder inv slice) = dkmat @ K
@@ -3098,22 +3262,24 @@ static Prec nethack_decoder_backward(void* w, void* activations,
     puf_mm_tn(&a->dq, &a->saved_input, &a->q_wgrad, stream);
     puf_mm_nn(&a->dtmp, &dw->lin_w, &a->grad_input, stream);
     puf_mm_nn(&a->dq, &dw->q_w, &a->grad_input2, stream);
-    nh_add_inplace_kernel<<<grid_size(B * dw->hidden_dim), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(nh_add_inplace_kernel, grid_size(B * dw->hidden_dim), BLOCK_SIZE, 0, stream)(
         a->grad_input.data, a->grad_input2.data, B * dw->hidden_dim);
     return a->grad_input;
 }
 
+#ifndef PUF_METAL
 __global__ void nh_fill_kernel(precision_t* p, float v, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) p[i] = from_float(v);
 }
+#endif  // PUF_METAL
 
 static void nethack_decoder_init_weights(void* w, uint64_t* seed, cudaStream_t stream) {
     NethackDecoderWeights* dw = (NethackDecoderWeights*)w;
     puf_kaiming_init(&dw->lin_w, 1.0f, (*seed)++, stream);
     puf_kaiming_init(&dw->q_w, 1.0f, (*seed)++, stream);
     puf_kaiming_init(&dw->k_w, 1.0f, (*seed)++, stream);
-    nh_fill_kernel<<<1, 32, 0, stream>>>(dw->tau.data, logf(10.0f), NH_TAU_PAD);
+    PUF_LAUNCH(nh_fill_kernel, 1, 32, 0, stream)(dw->tau.data, logf(10.0f), NH_TAU_PAD);
 }
 
 static void nethack_decoder_reg_params(void* w, Allocator* alloc) {

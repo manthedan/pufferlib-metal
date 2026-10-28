@@ -1,10 +1,19 @@
 // protein.cu -- Protein hyperparameter optimizer
 
+#ifdef PUF_METAL
+#define ACCELERATE_NEW_LAPACK
+#include <vecLib/cblas_new.h>
+#include <vecLib/lapack.h>
+#include <stdint.h>
+#include "metal/compat/cuda_runtime.h"
+#include "metal/compat/curand_kernel.h"
+#else
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 #include <curand.h>
 #include <curand_kernel.h>
+#endif
 #include <assert.h>
 #include <float.h>
 #include <math.h>
@@ -101,6 +110,9 @@ typedef struct {
     float *raw_params;
 } GPKernel;
 
+#ifdef PUF_METAL
+#include "metal/protein_cpu.h"
+#else
 static inline int gp_grid(int n) {
     return (n + GP_BLOCK - 1) / GP_BLOCK;
 }
@@ -304,15 +316,21 @@ static void gp_predict(GaussianProcess *gp, const float *d_Xte, float *d_means, 
         &zero, d_means, 1);
     cublasSaxpy(gp->cublas, m, &gp->mean, gp->d_ones, 0, d_means, 1);
 }
+#endif
 
 // Train kernel hyperparameters with Adam (score GP and cost GP).
 static float gp_train(GaussianProcess *gp, float *opt_m, float *opt_v,
         float *opt_vmax, int *opt_t, float lr, const float *X, const float *y,
         int n_data, int training_iter, cudaStream_t stream) {
+#ifdef PUF_METAL
+    memcpy(gp->d_X, X, n_data * gp->dim * sizeof(float));
+    memcpy(gp->d_y, y, n_data * sizeof(float));
+#else
     cudaMemcpyAsync(gp->d_X, X, n_data * gp->dim * sizeof(float),
         cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(gp->d_y, y, n_data * sizeof(float),
         cudaMemcpyHostToDevice, stream);
+#endif
     gp->n = n_data;
     if (gp_recompute(gp, stream) != 0) {
         return 0.0f;
@@ -332,6 +350,29 @@ static float gp_train(GaussianProcess *gp, float *opt_m, float *opt_v,
         int n = gp->n;
         const GPKernel *k = gp->kernel;
         int np = k->n_params;
+#ifdef PUF_METAL
+        float data_fit = cblas_sdot(n, gp->d_y, 1, gp->d_alpha, 1);
+        float sum_alpha = 0;
+        for (int i = 0; i < n; i++) {
+            sum_alpha += gp->d_alpha[i];
+        }
+        data_fit -= gp->mean * sum_alpha;
+        memset(gp->d_Kinv, 0, n * n * sizeof(float));
+        float log_det = 0;
+        for (int i = 0; i < n; i++) {
+            gp->d_Kinv[i * (n + 1)] = 1;
+            log_det += logf(gp->d_L[i * (n + 1)]);
+        }
+        int info;
+        spotrs_("L", &n, &n, gp->d_L, &n, gp->d_Kinv, &n, &info);
+        assert(info == 0);
+        float term1 = cblas_sdot(n, gp->d_alpha, 1, gp->d_alpha, 1);
+        float term2 = cblas_sasum(n, gp->d_Kinv, n + 1);
+        float d_noise = 0.5f * (term1 - term2) * softplus_grad(gp->raw_noise) / n;
+        float sigma_f = softplus(k->raw_params[SF_IDX(np)]);
+        float h_sums[nsum];
+        protein_mll_grad(gp, h_sums);
+#else
         cublasSetStream(gp->cublas, stream);
         float data_fit, sum_alpha;
         cublasSdot(gp->cublas, n, gp->d_y, 1, gp->d_alpha, 1, &data_fit);
@@ -383,6 +424,7 @@ static float gp_train(GaussianProcess *gp, float *opt_m, float *opt_v,
                 h_sums[c] += gp->h_partials[bi * nsum + c];
             }
         }
+#endif
         float inv_n = 0.5f / n;
         for (int dd = 0; dd < d; dd++) {
             gp->h_kg[dd] = inv_n * h_sums[dd] * softplus_grad(k->raw_params[dd]);
@@ -432,6 +474,7 @@ static float gp_train(GaussianProcess *gp, float *opt_m, float *opt_v,
     return loss;
 }
 
+#ifndef PUF_METAL
 // Candidate sampling (score / argmax run on host after GP predict)
 __global__ void protein_k_init_rng(curandStatePhilox4_32_10_t *states, int n,
         unsigned long long seed) {
@@ -464,6 +507,11 @@ __global__ void protein_k_sample(float *__restrict__ candidates,
     }
     rng[i] = state;
 }
+
+static int protein_rand(void) {
+    return rand();
+}
+#endif
 
 typedef struct {
     float score_loss, cost_loss, predicted_score, predicted_cost, rating;
@@ -513,7 +561,11 @@ typedef struct {
     GaussianProcess gp_score, gp_cost;
     float *opt_m; // 6 * n_opt: score m,v,vmax, cost m,v,vmax
     int opt_t_score, opt_t_cost, n_opt;
+#ifdef PUF_METAL
+    uint32_t sobol;
+#else
     curandGenerator_t sobol;
+#endif
     cudaStream_t stream;
     int suggestion_idx;
     float upper_cost_threshold;
@@ -570,6 +622,16 @@ ProteinSweep *protein_sweep_create(ProteinSweep init) {
     for (int i = 0; i < dim; i++) {
         scales[i] = sw->space->spaces[i].scale;
     }
+#ifdef PUF_METAL
+    sw->d_scales = (float *)malloc(dim * sizeof(float));
+    memcpy(sw->d_scales, scales, dim * sizeof(float));
+    sw->d_candidates = (float *)malloc(acq_cap * dim * sizeof(float));
+    sw->d_pred_y = (float *)malloc(2 * acq_cap * sizeof(float));
+    sw->d_pred_c = sw->d_pred_y + acq_cap;
+    sw->d_rng = (curandStatePhilox4_32_10_t *)calloc(acq_cap, sizeof(*sw->d_rng));
+    sw->d_centers = (float *)malloc(max_centers * dim * sizeof(float));
+    protein_k_init_rng(sw->d_rng, acq_cap, sw->rng_seed);
+#else
     cudaMalloc(&sw->d_scales, dim * sizeof(float));
     cudaMemcpy(sw->d_scales, scales, dim * sizeof(float), cudaMemcpyHostToDevice);
     cudaMalloc(&sw->d_candidates, acq_cap * dim * sizeof(float));
@@ -579,6 +641,7 @@ ProteinSweep *protein_sweep_create(ProteinSweep init) {
     cudaMalloc(&sw->d_centers, max_centers * dim * sizeof(float));
     protein_k_init_rng<<<(acq_cap + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE>>>(
         sw->d_rng, acq_cap, sw->rng_seed);
+#endif
 
     sw->clf_w = (float *)calloc(dim, sizeof(float));
     gp_init(&sw->gp_score, dim, sw->gp_max_obs, acq_cap, 0.01f);
@@ -586,9 +649,14 @@ ProteinSweep *protein_sweep_create(ProteinSweep init) {
     sw->n_opt = sw->gp_score.kernel->n_params + 2;
     sw->opt_m = (float *)calloc(6 * sw->n_opt, sizeof(float));
 
+#ifdef PUF_METAL
+    assert(dim > 0 && dim <= 20000);
+    sw->sobol = sw->rng_seed;
+#else
     curandCreateGeneratorHost(&sw->sobol, CURAND_RNG_QUASI_SCRAMBLED_SOBOL32);
     curandSetQuasiRandomGeneratorDimensions(sw->sobol, dim);
     curandSetGeneratorOffset(sw->sobol, sw->rng_seed);
+#endif
 
     sw->gp_train_params = (float *)malloc(sw->gp_max_obs * (dim + 2) * sizeof(float));
     sw->gp_train_y = sw->gp_train_params + sw->gp_max_obs * dim;
@@ -604,7 +672,9 @@ ProteinSweep *protein_sweep_create(ProteinSweep init) {
     sw->kd_idx = (int *)malloc(kd_cap * sizeof(int));
     sw->kd_nodes = (KDNode *)malloc(2 * kd_cap * sizeof(KDNode));
     sw->kd_keep = (int *)malloc(kd_cap * sizeof(int));
+#ifndef PUF_METAL
     cudaStreamCreate(&sw->stream);
+#endif
     return sw;
 }
 
@@ -692,15 +762,19 @@ int protein_sweep_should_stop(const ProteinSweep *sw, float score, float cost) {
 }
 
 static float noise01(void) {
-    float u1 = (rand() + 1.0f) / ((float)RAND_MAX + 1.0f);
-    float u2 = (rand() + 1.0f) / ((float)RAND_MAX + 1.0f);
+    float u1 = (protein_rand() + 1.0f) / ((float)RAND_MAX + 1.0f);
+    float u2 = (protein_rand() + 1.0f) / ((float)RAND_MAX + 1.0f);
     return 0.1f * sqrtf(-2.0f * logf(u1)) * cosf(2.0f * (float)M_PI * u2);
 }
 
 static void sobol_fallback(ProteinSweep *sw, float *out, int is_fixed_cost,
         float fixed_cost_norm) {
     int dim = sw->dim, cost_dim = sw->cost_dim;
+#ifdef PUF_METAL
+    protein_sobol(sw->sobol++, out, dim);
+#else
     curandGenerateUniform(sw->sobol, out, dim);
+#endif
     for (int d = 0; d < dim; d++) {
         out[d] = 2.0f * out[d] - 1.0f;
     }
@@ -900,7 +974,7 @@ ProteinSweepInfo protein_sweep_suggest(ProteinSweep *sw,
         int older_size = n_kept - recent_size;
         int num_sample = sw->gp_max_obs - recent_size;
         for (int i = 0; i < num_sample; i++) {
-            int j = i + rand() % (older_size - i);
+            int j = i + protein_rand() % (older_size - i);
             int tmp = sw->kept_buf[i];
             sw->kept_buf[i] = sw->kept_buf[j];
             sw->kept_buf[j] = tmp;
@@ -1128,7 +1202,7 @@ ProteinSweepInfo protein_sweep_suggest(ProteinSweep *sw,
     if (!is_fixed_cost) {
         if (sw->pool_remaining <= 0) {
             for (int i = PROTEIN_NUM_COST_RATIOS - 1; i > 0; i--) {
-                int j = rand() % (i + 1);
+                int j = protein_rand() % (i + 1);
                 float tmp = sw->ratio_pool[i];
                 sw->ratio_pool[i] = sw->ratio_pool[j];
                 sw->ratio_pool[j] = tmp;
@@ -1145,6 +1219,12 @@ ProteinSweepInfo protein_sweep_suggest(ProteinSweep *sw,
     if (n_total > sw->acq_cap) {
         n_total = sw->acq_cap;
     }
+#ifdef PUF_METAL
+    protein_k_sample(sw->d_candidates, sw->centers_buf, sw->d_scales,
+        sw->d_rng, n_total, n_centers, dim, sw->global_search_scale,
+        cost_dim, is_fixed_cost ? fixed_cost_norm : NAN);
+    memcpy(sw->h_cands, sw->d_candidates, n_total * dim * sizeof(float));
+#else
     cudaMemcpyAsync(sw->d_centers, sw->centers_buf, n_centers * dim * sizeof(float),
         cudaMemcpyHostToDevice, sw->stream);
     protein_k_sample<<<(n_total + BLOCK_SIZE - 1) / BLOCK_SIZE, BLOCK_SIZE, 0, sw->stream>>>(
@@ -1155,6 +1235,7 @@ ProteinSweepInfo protein_sweep_suggest(ProteinSweep *sw,
     cudaMemcpyAsync(sw->h_cands, sw->d_candidates, n_total * dim * sizeof(float),
         cudaMemcpyDeviceToHost, sw->stream);
     cudaStreamSynchronize(sw->stream);
+#endif
     int n_cands = filter_near_duplicates(
         sw, sw->h_cands, n_total, dim, PROTEIN_EPSILON, sw->kept_buf);
     if (n_cands < n_total) {
@@ -1162,8 +1243,12 @@ ProteinSweepInfo protein_sweep_suggest(ProteinSweep *sw,
             memmove(&sw->h_cands[i * dim], &sw->h_cands[sw->kept_buf[i] * dim],
                 dim * sizeof(float));
         }
+#ifdef PUF_METAL
+        memcpy(sw->d_candidates, sw->h_cands, n_cands * dim * sizeof(float));
+#else
         cudaMemcpyAsync(sw->d_candidates, sw->h_cands, n_cands * dim * sizeof(float),
             cudaMemcpyHostToDevice, sw->stream);
+#endif
     }
 
     if (n_cands == 0) {
@@ -1227,11 +1312,16 @@ ProteinSweepInfo protein_sweep_suggest(ProteinSweep *sw,
     // GP predict + score/argmax
     gp_predict(&sw->gp_score, sw->d_candidates, sw->d_pred_y, n_cands, sw->stream);
     gp_predict(&sw->gp_cost, sw->d_candidates, sw->d_pred_c, n_cands, sw->stream);
+#ifdef PUF_METAL
+    memcpy(sw->h_pred, sw->d_pred_y, n_cands * sizeof(float));
+    memcpy(sw->h_pred + n_cands, sw->d_pred_c, n_cands * sizeof(float));
+#else
     cudaMemcpyAsync(sw->h_pred, sw->d_pred_y, n_cands * sizeof(float),
         cudaMemcpyDeviceToHost, sw->stream);
     cudaMemcpyAsync(sw->h_pred + n_cands, sw->d_pred_c, n_cands * sizeof(float),
         cudaMemcpyDeviceToHost, sw->stream);
     cudaStreamSynchronize(sw->stream);
+#endif
 
     int best = 0;
     float best_s = -FLT_MAX;

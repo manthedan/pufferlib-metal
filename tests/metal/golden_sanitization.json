@@ -1,0 +1,161 @@
+{
+  "files": {
+    "wide_reports/SHA256.json": {
+      "original_sha256": "35e6ba7c393ea228c5804a33568da7f54a6cc5bba6166500b8fa1109cec53b69",
+      "rule": "regenerate-log-sha256-entries-v1",
+      "sanitized_sha256": "49b79a24c37f67ddb98ede3249e1588666a43fe184cf96afc504a4f981049759"
+    },
+    "wide_reports/wide_a-freeway-policy.log": {
+      "original_sha256": "b26f785ff7832decdfe3e777fe5d4953239cfbb8d0c5cef5da417bc116228bd1",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "125bb6741fa03c805b896e1999452a7e354995eba347343db7995f7ce3363b62"
+    },
+    "wide_reports/wide_a-freeway-replay.log": {
+      "original_sha256": "f07738e45419e505aa413968cf7ad3ee646dc4fc2980fd1c850f44c66907f13d",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "d9446378dd229b6772d7bb237cfd088b457d7c8993c4655e641c26b0651f29f7"
+    },
+    "wide_reports/wide_a-freeway-train.log": {
+      "original_sha256": "e8008dc360ee3320a3169d0ee4b2d551ac0f0f5ef720068732ff5b7ed133e984",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "f82d912064e54ef6cd5afce47245523767c6a960e01cb7aa40f7dee25c0b22cf"
+    },
+    "wide_reports/wide_a-ops.log": {
+      "original_sha256": "c864444aa9bb438fa3c57375198ee0e852616d93e7d472293b105e267e15372f",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "829402217a0de78d08266342fa5bec7541a84292a725a67c1f692cb9e11d0fda"
+    },
+    "wide_reports/wide_a-tetris-policy.log": {
+      "original_sha256": "74451af7d76abfc8961a44f04cb129b09ceafce1b04e099af9029eed0c578931",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "fe1abfff3d22425e0292f5bc8a047be61328594e3e7d631d06f250872c60ded2"
+    },
+    "wide_reports/wide_a-tetris-replay.log": {
+      "original_sha256": "939e9b68357568e8b2ecbfe4d67910c1a1724aae22ec6a1ce64a75ff424aef39",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "0e1281fa762b256112003540ca738728061060a4c0b488ecadca78c22394bfde"
+    },
+    "wide_reports/wide_a-tetris-train.log": {
+      "original_sha256": "33bfb42c41179d949c1c8a06434ecb1ac2a181c5bd42c85829e490af5b985a81",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "c8b0ac7135141afd99bc5fa8f9b1f13aa6c7246c7f0aad97bf514272d71e301b"
+    },
+    "wide_reports/wide_b-freeway-policy.log": {
+      "original_sha256": "ecf01463fed9cb129e1c7f38be8b172db601f6be4551324842527d8d48aa03ad",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "31a7a6ce7524cce0ea66efde4590adb246fe874db5415935ac42e0efdf8ad419"
+    },
+    "wide_reports/wide_b-freeway-replay.log": {
+      "original_sha256": "0b87219df926ac5069fbb15c1927b3c140839213fd6e55390ad9d315988615fc",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "b64932576f478744a04d0b1a92fd34a1c0fb2949fcdc80cb0028d4ab65112e4d"
+    },
+    "wide_reports/wide_b-freeway-train.log": {
+      "original_sha256": "ec67bc430ddc189ab08691a35eca19375c778810fbb9f4dbb6fb2011e520c38c",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "e6ed263cfce86f9019b6025888446edc9892fa0ba98d030b6e5d9b6c78adda97"
+    },
+    "wide_reports/wide_b-ops.log": {
+      "original_sha256": "71eda4c9aee276657e263218ebeda9f56665d6f5afc10f818089bd33f77e767e",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "0990a551b80266ebaa5fa0c691fc3e51df6b5bffa3c12dfa551e4db5641f024e"
+    },
+    "wide_reports/wide_b-tetris-policy.log": {
+      "original_sha256": "8d00caec91d777df83125d14e35dde93fabcf1f6497a86b5ab23818ac069733c",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "230e158570bc7c39f3e800291b5d671f2eb440a6dd82fdb23dc0314522f8f1ee"
+    },
+    "wide_reports/wide_b-tetris-replay.log": {
+      "original_sha256": "3259a0ab89a7e2840d6479281d4905a5ce1c10f15630814cc447674f4af14c69",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "80a41869bc13db8f75a8142019ddf743adfc0f144984075cc36b5fff8d9777dc"
+    },
+    "wide_reports/wide_b-tetris-train.log": {
+      "original_sha256": "4cb18dfcbf96e2aae7e652d0316d3b79ca876511a5662543fca0a7a61888ad3c",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "16f3d8357487bbd60d69ba256d9b4103a0507d69286ebc16d83e223d1e69452d"
+    },
+    "wide_reports/wide_bf16-freeway-policy.log": {
+      "original_sha256": "62d9a7f3754167f13b2609c8fe00041366a41334ddf0f7493855a1bffc48c1ea",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "ccf94dc6cc7f5e4c3a515bac3d82eb06d1739781a1dc4cc28854349412f24835"
+    },
+    "wide_reports/wide_bf16-freeway-replay.log": {
+      "original_sha256": "edbfb52b91e66b7f745b88f300d59792c45cbe9123cd0bd026fd8ac48f635447",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "bcfac892668305785434624a171a4c197c185b6f275a4cb869c744213fce11fd"
+    },
+    "wide_reports/wide_bf16-freeway-train.log": {
+      "original_sha256": "8d1c14efcb15f83947b82d18c68f35c2698c1eab0f5341891d1dfa578aeb8592",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "42614097b624c0884fc91528ad3142bea240723f2ab80a7caaf958f437500ac0"
+    },
+    "wide_reports/wide_bf16-ops.log": {
+      "original_sha256": "4532470c81e34c344a05f8f61f8c8c306fe4ec72eea5fed4b046cb9f8bbd05ad",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "b874eb8cdbc9d7f30b322467a91ea4b9aa31e4ca98844a8c71170345b91c3454"
+    },
+    "wide_reports/wide_bf16-tetris-policy.log": {
+      "original_sha256": "1a855210e99dbf7766b661a48fea5d2f026775365ca8dcd78af3fcddc938db07",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "f9d6770c6bd00ba232b13c00c9cd4fd17fe5ff9f00b3f43dc8c43999c59a5d10"
+    },
+    "wide_reports/wide_bf16-tetris-replay.log": {
+      "original_sha256": "abd1c787fc5ebbc57a28ce560545d8004a460066685f522da6fb3bfdffc40d9d",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "4122d11721c150af9457d27a3c0e47f3deac9a9ce98e5309e8c61e1fd348405b"
+    },
+    "wide_reports/wide_bf16-tetris-train.log": {
+      "original_sha256": "fa2578cad895ad08ae39fda9c28a5e37fa41575a07fb336f9cdacbf44454ac89",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "6e4457e4300d9bf7e49b65ed1faee9c9c21a00ad6219bf00da566b8b545fcef9"
+    },
+    "wide_reports/wide_bf16_b-freeway-policy.log": {
+      "original_sha256": "153618c7fb8232ce9f93ea179be5d9b5893801753b4b3dc4fd729d22b65d22e9",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "e2447bc8953296144a1692df7cf3d76873789b6df59e5c02313afe5640d92449"
+    },
+    "wide_reports/wide_bf16_b-freeway-replay.log": {
+      "original_sha256": "d565b2c6f7f4c3a32c72e7b1d9d0e7c0ae94894714bb6895e6460e71f1e10105",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "bf3c88c98699210a566e6e9b780ca3d59d6bc3b6f9c5959dafff15bf47cd63e4"
+    },
+    "wide_reports/wide_bf16_b-freeway-train.log": {
+      "original_sha256": "9d670c44b5d060b9301f7ef6c7b52fe0fc54653f3947da588c12fe26eebd9c8b",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "7b74a2dc834582caf4c13a5511d39800a490ae92f8f1858d964f7eb9d0f69d97"
+    },
+    "wide_reports/wide_bf16_b-ops.log": {
+      "original_sha256": "80a6068038c099c69d4033d9cb748efeb84b2856f5edc979c1402d4f851d45af",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "ecd2bfc69f13c64bdb9dd41f42014d0f1d7d47dc01b65164d50712e29793078f"
+    },
+    "wide_reports/wide_bf16_b-tetris-policy.log": {
+      "original_sha256": "39edbcf032f48bfd1f4f9d0b46e520ac4557ee4d39b2d23aadd097401b1cfa3d",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "c281e726f1ca5c2cdb75e4b8aa466c2859559481080b2b4b38ca5939f7bbacab"
+    },
+    "wide_reports/wide_bf16_b-tetris-replay.log": {
+      "original_sha256": "b4c34c82af02bd4e924c4751657f8148fa60ba3513a029d85d7fc5aaa2d233ac",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "c151dea1de438a42f79e8de202e750fc4fe73f5e47683afbb8671b1fd41662e2"
+    },
+    "wide_reports/wide_bf16_b-tetris-train.log": {
+      "original_sha256": "c5553425144d04f6d944e2827b818e59ce2527667ffef12f5aaf99b9503f75de",
+      "rule": "cuda-reference-checkout-v1",
+      "sanitized_sha256": "16bfb9cb250e79f6efa01513e09c4f61f1439dde09e4c80651a8da05de56dc35"
+    }
+  },
+  "rules": {
+    "cuda-reference-checkout-v1": {
+      "replace_regex": "/home/[A-Za-z0-9._-]+/metal_puffer_ref/",
+      "scope": "wide_reports/*.log",
+      "with_token": "<cuda-ref>/"
+    },
+    "regenerate-log-sha256-entries-v1": {
+      "description": "Replace only digest bytes for sanitized files; preserve all other bytes and ordering."
+    }
+  },
+  "unchanged_inventory_sha256": "bfacda491a5075f42775b57b11e706fd96a5dd1f00c59019f4196974fa6f6cfa",
+  "version": 1
+}

@@ -1,0 +1,97 @@
+pufferlib-metal: an unofficial Apple Metal 4 backend for PufferLib 5.
+
+Upstream base: PufferAI/PufferLib branch 5.0, revision
+ea7f989371270d2948f96728bda8aec5e7634a4c.
+
+Third-party code and assets inherited unchanged from upstream PufferLib retain
+their own licenses (see vendor/ and resources/*).
+See [THIRD_PARTY.md](THIRD_PARTY.md) for the inventory of declared sources,
+licenses and notices, including missing provenance. It is not a legal determination.
+
+PufferLib is Copyright (c) 2022 PufferAI, MIT License (see LICENSE).
+
+Portions of the Metal backend are adapted from Valtteri Valo's Metal 4 backend
+for PufferLib 4.0 (https://github.com/valtterivalo/PufferLib, branch
+metal-local; see also PufferAI/PufferLib PR #532), also MIT licensed:
+  - src/metal/runtime.mm: device, buffer wrapping and residency handling, adapted
+    from src/metal/platform.{h,mm}
+  - src/metal/shaders/gemm.metal: split-K GEMM tile loop structure, adapted from
+    sgemm_ksplit and platform.mm
+Thanks to Valtteri for the prior art that made this port much easier.
+
+Portions of src/metal/shaders/muon.metal and src/metal/shaders/wide_muon.h adapt the explicit SIMD shuffle
+reduction mechanism in MLX mlx/backend/metal/kernels/reduction/ops.h and
+8x8 fragment coordinates in mlx/backend/metal/kernels/steel/gemm/mma.h, pinned
+commit 56c2bf9236d929097f61e2c6e55be4e4bb6da249
+(https://github.com/ml-explore/mlx). Modifications: retain Puffer's lane-local
+accumulation and wide-norm shared-memory tree through stride 32; finish only the last
+five matching additions with shuffles, with a threadgroup handoff where needed;
+use spatial FP32 MMA fragments for the H64 Muon gram-buffer/update stages,
+retaining Puffer's struct ABI, explicit storage conversion and alpha/beta finish.
+
+MIT License
+
+Copyright © 2023 Apple Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+Protein public Sobol direction numbers
+=====================================
+
+tools/metal/joe-kuo/new-joe-kuo-6.20000 is an exact publisher-text excerpt for
+the first 20,000 dimensions of Joe--Kuo new-joe-kuo-6.21201, and
+src/metal/protein_sobol_public.bin contains its compact construction
+parameters. Source: https://web.maths.unsw.edu.au/~fkuo/sobol/ (also from
+https://github.com/joe-kuo/sobol_data). The generator expands the parameters
+with the standard Sobol recurrence; this fork adds fixed-seed SplitMix64
+digital shifts. No cuRAND-exported direction or scramble table is bundled.
+
+-----------------------------------------------------------------------------
+Licence pertaining to sobol.cc and the accompanying sets of direction numbers
+
+-----------------------------------------------------------------------------
+Copyright (c) 2008, Frances Y. Kuo and Stephen Joe
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+
+    * Neither the names of the copyright holders nor the names of the
+      University of New South Wales and the University of Waikato
+      and its contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

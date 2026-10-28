@@ -1,0 +1,11 @@
+{
+  "archive_sha256": "90c6375dab77e4634868ad780474068768ce610a92e8550e1f376caa50cae1e5",
+  "archive_size": 3190932528,
+  "file_count": 10059,
+  "fixture_contracts_sha256": "24cd8bac19800957c53f3243b0345450482f3b0d26bf6a154e59e963cdb23ba8",
+  "format": "ustar+gzip",
+  "format_version": 1,
+  "status": "ready, unpublished",
+  "uncompressed_size": 5294267886,
+  "url": ""
+}

@@ -1,0 +1,2 @@
+# Preserve the publisher's exact trailing spaces in the SHA-pinned source text.
+tools/metal/joe-kuo/new-joe-kuo-6.20000 -whitespace

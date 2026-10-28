@@ -516,8 +516,6 @@ void generate_terrain(char* terrain, unsigned char* rendered,
     // Cellular automata to cover unfilled ridges
     cellular_automata(biomes, R, C, 4, 4000, rng);
 
-    unsigned char (*rendered_ary)[C][3] = (unsigned char(*)[C][3])rendered;
-
     for (int r = 0; r < R; r++) {
         for (int c = 0; c < C; c++) {
             int tile;
@@ -536,9 +534,9 @@ void generate_terrain(char* terrain, unsigned char* rendered,
                 }
             }
             terrain[adr] = tile;
-            rendered_ary[r][c][0] = RENDER_COLORS[tile][0];
-            rendered_ary[r][c][1] = RENDER_COLORS[tile][1];
-            rendered_ary[r][c][2] = RENDER_COLORS[tile][2];
+            rendered[3*adr + 0] = RENDER_COLORS[tile][0];
+            rendered[3*adr + 1] = RENDER_COLORS[tile][1];
+            rendered[3*adr + 2] = RENDER_COLORS[tile][2];
         }
     }
     free(perlin_map);
@@ -1438,11 +1436,10 @@ int find_target(MMO* env, int pid, int entity_type) {
     }
 
     entity->anim = anim;
-    int (*deltas)[num_deltas][2] = (int(*)[num_deltas][2])flat_deltas;
     for (int direction = 0; direction < 4; direction++) {
         for (int idx = 0; idx < num_deltas; idx++) {
-            int dr = deltas[direction][idx][0];
-            int dc = deltas[direction][idx][1];
+            int dr = flat_deltas[2*(direction*num_deltas + idx) + 0];
+            int dc = flat_deltas[2*(direction*num_deltas + idx) + 1];
             int rr = r + dr;
             int cc = c + dc;
 
@@ -2461,39 +2458,36 @@ Animation ANIMATIONS[7] = {
 
 void render_conversion(char* flat_tiles, int* flat_converted, int R, int C, unsigned int* rng) {
     char* tex_codes = tile_atlas;
-    char (*tiles)[C] = (char(*)[C])flat_tiles;
-    int (*converted)[C] = (int(*)[C])flat_converted;
-
     for (int r = 1; r < R-1; r++) {
         for (int c = 1; c < C-1; c++) {
-            int tile = tiles[r][c];
+            int tile = flat_tiles[r*C + c];
             assert(flat_tiles[r*C + c] == tile);
             int byte_code = 0;
             if (is_grass(tile)) {
                 byte_code = 255;
             } else {
-                if (tiles[r-1][c-1] != tile) {
+                if (flat_tiles[(r-1)*C + (c-1)] != tile) {
                     byte_code += 128;
                 }
-                if (tiles[r-1][c] != tile) {
+                if (flat_tiles[(r-1)*C + c] != tile) {
                     byte_code += 64;
                 }
-                if (tiles[r-1][c+1] != tile) {
+                if (flat_tiles[(r-1)*C + (c+1)] != tile) {
                     byte_code += 32;
                 }
-                if (tiles[r][c-1] != tile) {
+                if (flat_tiles[r*C + (c-1)] != tile) {
                     byte_code += 16;
                 }
-                if (tiles[r][c+1] != tile) {
+                if (flat_tiles[r*C + (c+1)] != tile) {
                     byte_code += 8;
                 }
-                if (tiles[r+1][c-1] != tile) {
+                if (flat_tiles[(r+1)*C + (c-1)] != tile) {
                     byte_code += 4;
                 }
-                if (tiles[r+1][c] != tile) {
+                if (flat_tiles[(r+1)*C + c] != tile) {
                     byte_code += 2;
                 }
-                if (tiles[r+1][c+1] != tile) {
+                if (flat_tiles[(r+1)*C + (c+1)] != tile) {
                     byte_code += 1;
                 }
             }
@@ -2536,7 +2530,7 @@ void render_conversion(char* flat_tiles, int* flat_converted, int R, int C, unsi
                 int num_winter = 0;
                 for (int rr = r-1; rr <= r+1; rr++) {
                     for (int cc = c-1; cc <= c+1; cc++) {
-                        int tile = tiles[rr][cc];
+                        int tile = flat_tiles[rr*C + cc];
                         if (tile == TILE_SPRING_GRASS) {
                             num_spring += 1;
                         } else if (tile == TILE_SUMMER_GRASS) {
@@ -2573,7 +2567,7 @@ void render_conversion(char* flat_tiles, int* flat_converted, int R, int C, unsi
                     idx += 12;
                 }
             }
-            converted[r][c] = idx;
+            flat_converted[r*C + c] = idx;
         }
     }
 }

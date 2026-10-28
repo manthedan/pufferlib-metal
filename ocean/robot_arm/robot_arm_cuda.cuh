@@ -1,7 +1,9 @@
 #pragma once
 
 #include <assert.h>
+#ifndef RA_CPU
 #include <cuda_bf16.h>
+#endif
 #include <stdint.h>
 
 #include "robot_arm.h"
@@ -3572,9 +3574,24 @@ typedef struct Env {
 static_assert(sizeof(RaState) % sizeof(unsigned int) == 0,
     "Robot-arm CUDA state must remain naturally word aligned");
 
-__global__ void ra_kinit(Env* envs, obs_t* observations,
+// CPU calls the same per-environment kernel bodies with count=1.
+#ifdef RA_CPU
+#define RA_KERNEL static
+#define RA_KERNEL_INDEX 0
+#ifdef from_float
+#define RA_OBS(x) from_float(x)
+#else
+#define RA_OBS(x) (x)
+#endif
+#else
+#define RA_KERNEL __global__
+#define RA_KERNEL_INDEX (blockIdx.x * blockDim.x + threadIdx.x)
+#define RA_OBS(x) __float2bfloat16(x)
+#endif
+
+RA_KERNEL void ra_kinit(Env* envs, obs_t* observations,
         float* rewards, float* terminals, int count) {
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int index = RA_KERNEL_INDEX;
     if (index >= count) {
         return;
     }
@@ -3582,15 +3599,15 @@ __global__ void ra_kinit(Env* envs, obs_t* observations,
     ra_observe(&envs[index].world.state, local_observation);
     for (int feature = 0; feature < OBS_SIZE; ++feature) {
         observations[index * OBS_SIZE + feature] =
-            __float2bfloat16(local_observation[feature]);
+            RA_OBS(local_observation[feature]);
     }
     rewards[index] = 0.0f;
     terminals[index] = 0.0f;
 }
 
-__global__ void ra_kbegin(Env* envs, int start, int count,
+RA_KERNEL void ra_kbegin(Env* envs, int start, int count,
         const float* actions) {
-    int local = blockIdx.x * blockDim.x + threadIdx.x;
+    int local = RA_KERNEL_INDEX;
     if (local >= count) {
         return;
     }
@@ -3625,9 +3642,9 @@ __global__ void ra_kbegin(Env* envs, int start, int count,
     state->step += 1;
 }
 
-__global__ void ra_kphys(Env* envs, int start,
+RA_KERNEL void ra_kphys(Env* envs, int start,
         int count) {
-    int local = blockIdx.x * blockDim.x + threadIdx.x;
+    int local = RA_KERNEL_INDEX;
     if (local >= count) {
         return;
     }
@@ -3641,9 +3658,9 @@ __global__ void ra_kphys(Env* envs, int start,
     }
 }
 
-__global__ void ra_kfin(Env* envs, int start, int count,
+RA_KERNEL void ra_kfin(Env* envs, int start, int count,
         obs_t* observations, float* rewards, float* terminals) {
-    int local = blockIdx.x * blockDim.x + threadIdx.x;
+    int local = RA_KERNEL_INDEX;
     if (local >= count) {
         return;
     }
@@ -3671,8 +3688,12 @@ __global__ void ra_kfin(Env* envs, int start, int count,
     ra_observe(&world->state, local_observation);
     for (int feature = 0; feature < OBS_SIZE; ++feature) {
         observations[state_index * OBS_SIZE + feature] =
-            __float2bfloat16(local_observation[feature]);
+            RA_OBS(local_observation[feature]);
     }
     rewards[state_index] = reward;
     terminals[state_index] = terminal;
 }
+
+#undef RA_KERNEL
+#undef RA_KERNEL_INDEX
+#undef RA_OBS

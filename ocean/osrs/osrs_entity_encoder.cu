@@ -81,6 +81,7 @@ static OsrsEntityBranchActivations* osrs_entity_branch_activations(
     return (OsrsEntityBranchActivations*)(activations + 1);
 }
 
+#ifndef PUF_METAL
 __device__ __forceinline__ float osrs_entity_gelu_fwd(float x) {
     float inner = 0.7978845608028654f * (x + 0.044715f * x * x * x);
     return 0.5f * x * (1.0f + tanhf(inner));
@@ -312,6 +313,8 @@ __global__ void osrs_entity_fused_grad_z1(
     }
 }
 
+#endif  // PUF_METAL: src/metal/kernels_envs.h + shaders/envs_osrs.metal
+
 static void osrs_entity_launch_fused_fwd(
     precision_t* out,
     int* argmax,
@@ -334,7 +337,7 @@ static void osrs_entity_launch_fused_fwd(
         (size_t)OSRS_ENTITY_BATCH_TILE * num_records * OSRS_ENTITY_BOTTLENECK +
         (size_t)OSRS_ENTITY_BATCH_TILE * num_records +
         (size_t)OSRS_ENTITY_HIDDEN_TILE * OSRS_ENTITY_BOTTLENECK) * sizeof(float);
-    osrs_entity_fused_pool_fwd<<<grid, block, shared_bytes, stream>>>(
+    PUF_LAUNCH(osrs_entity_fused_pool_fwd, grid, block, shared_bytes, stream)(
         out, argmax, h1, z1, record_flat, l2_w,
         B, H, num_records, record_features, active_width);
 }
@@ -352,12 +355,12 @@ static void osrs_entity_launch_fused_bwd(
     int num_records,
     cudaStream_t stream
 ) {
-    osrs_entity_fused_l2_wgrad<<<H, 256, 0, stream>>>(
+    PUF_LAUNCH(osrs_entity_fused_l2_wgrad, H, 256, 0, stream)(
         l2_wgrad, grad, h1, argmax, B, H, num_records);
     size_t shared_bytes =
         ((size_t)num_records * OSRS_ENTITY_BOTTLENECK + 2 * BLOCK_SIZE) *
         sizeof(float);
-    osrs_entity_fused_grad_z1<<<B, BLOCK_SIZE, shared_bytes, stream>>>(
+    PUF_LAUNCH(osrs_entity_fused_grad_z1, B, BLOCK_SIZE, shared_bytes, stream)(
         grad_z1, grad, l2_w, z1, argmax, B, H, num_records);
 }
 
@@ -381,9 +384,9 @@ static Prec osrs_entity_encoder_forward(
     puf_mm(&input, &ew->global_w, &a->out, stream);
 
     int inventory_batch = B * OSRS_ENTITY_INV_NUM_RECORDS;
-    osrs_entity_gather_branch<<<
+    PUF_LAUNCH(osrs_entity_gather_branch,
         grid_size(inventory_batch * OSRS_ENTITY_INV_FEATURES),
-        BLOCK_SIZE, 0, stream>>>(
+        BLOCK_SIZE, 0, stream)(
         a->inv_flat.data, input.data, B, ew->obs_size,
         OSRS_ENTITY_INV_START, OSRS_ENTITY_INV_NUM_RECORDS,
         OSRS_ENTITY_INV_OBS_FEATURES, 0, OSRS_ITEM_OBS_CODE_SCALE,
@@ -409,8 +412,8 @@ static Prec osrs_entity_encoder_forward(
             &osrs_entity_branch_activations(a)[branch_idx];
         int features = osrs_entity_branch_features(descriptor);
         int branch_batch = B * descriptor->num_records;
-        osrs_entity_gather_branch<<<
-            grid_size(branch_batch * features), BLOCK_SIZE, 0, stream>>>(
+        PUF_LAUNCH(osrs_entity_gather_branch,
+            grid_size(branch_batch * features), BLOCK_SIZE, 0, stream)(
             ba->flat.data, input.data, B, ew->obs_size,
             descriptor->obs_start, descriptor->num_records,
             descriptor->obs_features, descriptor->type_onehot,

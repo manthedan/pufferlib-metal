@@ -250,7 +250,7 @@ float fast_rng(CachedRNG* rng) {
 
 int bfs(Map *map, unsigned char *flat_paths, int* flat_buffer, int dest_r, int dest_c) {
     int N = map->width;
-    unsigned char (*paths)[N] = (unsigned char(*)[N])flat_paths;
+    unsigned char* paths = flat_paths;
     int (*buffer)[3] = (int(*)[3])flat_buffer;
 
     int start = 0;
@@ -273,16 +273,16 @@ int bfs(Map *map, unsigned char *flat_paths, int* flat_buffer, int dest_r, int d
         if (start_r < 0 || start_r >= N || start_c < 0 || start_c >= N) {
             continue;
         }
-        if (paths[start_r][start_c] != 255) {
+        if (paths[start_r * N + start_c] != 255) {
             continue;
         }
         int adr = map_offset(map, start_r, start_c);
         if (map->grid[adr] == 1) {
-            paths[start_r][start_c] = 8;
+            paths[start_r * N + start_c] = 8;
             continue;
         }
 
-        paths[start_r][start_c] = atn;
+        paths[start_r * N + start_c] = atn;
 
         buffer[end][0] = 0;
         buffer[end][1] = start_r - 1;
@@ -324,7 +324,7 @@ int bfs(Map *map, unsigned char *flat_paths, int* flat_buffer, int dest_r, int d
         buffer[end][2] = start_c - 1;
         end++;
     }
-    paths[dest_r][dest_c] = 8;
+    paths[dest_r * N + dest_c] = 8;
     return 0;
 }
 

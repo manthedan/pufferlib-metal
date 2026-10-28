@@ -17,8 +17,13 @@ void nethack_policy_init(Ini* ini) {
         assert(cudaMalloc(&dev, (size_t)nv * na) == cudaSuccess);
         assert(cudaMemcpy(dev, host, (size_t)nv * na,
             cudaMemcpyHostToDevice) == cudaSuccess);
+#ifdef PUF_METAL
+        d_hc_dev = dev;
+        d_hc_stride = na;
+#else
         cudaMemcpyToSymbol(d_hc_dev, &dev, sizeof(dev));
         cudaMemcpyToSymbol(d_hc_stride, &na, sizeof(na));
+#endif
     }
     g_veps_base = puf_ini_get(ini, "train", "verb_eps");
     g_veps_start = puf_ini_get(ini, "train", "verb_eps_anneal_start");
@@ -27,7 +32,11 @@ void nethack_policy_init(Ini* ini) {
         cudaMalloc(&g_veps_dev, sizeof(float));
         cudaMemcpy(g_veps_dev, &g_veps_base, sizeof(float),
             cudaMemcpyHostToDevice);
+#ifdef PUF_METAL
+        d_veps_dev = g_veps_dev;
+#else
         cudaMemcpyToSymbol(d_veps_dev, &g_veps_dev, sizeof(g_veps_dev));
+#endif
     }
 }
 
@@ -56,6 +65,7 @@ void nethack_policy_on_rollout(long step, long total) {
     cudaMemcpy(g_veps_dev, &eps, sizeof(float), cudaMemcpyHostToDevice);
 }
 
+#ifndef PUF_METAL
 __device__ int nethack_head_used(int verb, int h) {
     if (h == 0 || !d_hc_dev) {
         return 1;
@@ -115,3 +125,5 @@ __device__ float nethack_verb_train_logp(const precision_t* mask_row,
     *scale = (1.0f - eps) * p_act / p_mix;
     return __logf(p_mix);
 }
+
+#endif  // PUF_METAL

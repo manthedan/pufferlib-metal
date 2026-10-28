@@ -1,0 +1,81 @@
+{
+ "_archive": {"description": "Historical development results; numbers preserved", "tree_commit": "e68239d9"},
+ "metal_commit": "08dbe4da",
+ "cuda_commit": "9d49661c0ba2e24cd4bce1241bb1b48a8486a63c (the CUDA reference host golden-envs: upstream ea7f9893 + inactive golden hooks)",
+ "gpu": {
+  "metal": "Apple M4 (shared with a concurrent benchmark agent)",
+  "cuda": "RTX 3090, driver 580.178.04"
+ },
+ "configs_sha256": {
+  "config/default.ini": "7f493977f49f2537a59c18c2a283f062e5d6063d9e130c2d15f6be075cda1084",
+  "config/osrs_zulrah.ini": "93d1288442a7807a57e2d5bad0eb514a172d2e3d6408f10fc74ff5dd01328de9"
+ },
+ "score_definition": "env/score from saved INI metrics; train_* = last train log interval, eval_* = final batched evaluation",
+ "mean_sps_definition": "executed steps / final trainer uptime; excludes evaluation",
+ "results": [
+  {
+   "backend": "Metal",
+   "env": "osrs_zulrah",
+   "seed": 73,
+   "configured_steps": 33817236,
+   "steps": 33816576,
+   "epochs": 129,
+   "train_uptime": 398.5467360019684,
+   "mean_sps": 84849.7125813445,
+   "train_score": 3.071889117360115,
+   "train_wins": 2.1826618686318398,
+   "eval_score": 3.1314027309417725,
+   "eval_wins": 2.2212727069854736,
+   "eval_episodes": 12288,
+   "eval_episode_length": 593.4961547851562
+  },
+  {
+   "backend": "CUDA FP32",
+   "env": "osrs_zulrah",
+   "seed": 73,
+   "configured_steps": 33817236,
+   "steps": 33816576,
+   "epochs": 129,
+   "train_uptime": 56.4394965171814,
+   "mean_sps": 599165.0898180055,
+   "train_score": 3.275067001581192,
+   "train_wins": 2.304786577820778,
+   "eval_score": 3.2974071502685547,
+   "eval_wins": 2.3212077617645264,
+   "eval_episodes": 12288,
+   "eval_episode_length": 595.6897583007812
+  },
+  {
+   "backend": "CUDA FP32",
+   "env": "osrs_zulrah",
+   "seed": 74,
+   "configured_steps": 33817236,
+   "steps": 33816576,
+   "epochs": 129,
+   "train_uptime": 56.32669115066528,
+   "mean_sps": 600365.0367025081,
+   "train_score": 3.172569513320923,
+   "train_wins": 2.2284901291131973,
+   "eval_score": 3.1972880363464355,
+   "eval_wins": 2.252990484237671,
+   "eval_episodes": 12289,
+   "eval_episode_length": 590.5281372070312
+  },
+  {
+   "backend": "CUDA FP32",
+   "env": "osrs_zulrah",
+   "seed": 75,
+   "configured_steps": 33817236,
+   "steps": 33816576,
+   "epochs": 129,
+   "train_uptime": 52.63885998725891,
+   "mean_sps": 642426.0709328661,
+   "train_score": 3.1573547422885895,
+   "train_wins": 2.225034177303314,
+   "eval_score": 3.1794216632843018,
+   "eval_wins": 2.2425944805145264,
+   "eval_episodes": 12288,
+   "eval_episode_length": 591.9645385742188
+  }
+ ]
+}

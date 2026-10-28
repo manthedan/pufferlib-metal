@@ -197,3 +197,7 @@ resources/trailer/shots/*.mp4
 .refactor-snapshots/
 
 vendor/fast-nle/
+
+# Rebuilt trailer tools (sources remain tracked)
+/resources/trailer/trailer
+/resources/trailer/architecture

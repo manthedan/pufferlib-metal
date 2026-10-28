@@ -13,7 +13,7 @@ void puf_normal_init(Prec* dst, float std, ulong seed, cudaStream_t stream) {
     curandSetPseudoRandomGeneratorSeed(gen, seed);
     curandGenerateNormal(gen, buf, rand_count, 0.0f, std);
     curandDestroyGenerator(gen);
-    cast<<<grid_size(n), BLOCK_SIZE, 0, stream>>>(dst->data, buf, n);
+    PUF_LAUNCH(cast, grid_size(n), BLOCK_SIZE, 0, stream)(dst->data, buf, n);
     cudaFree(buf);
 }
 
@@ -65,7 +65,9 @@ static void create_custom_encoder(Encoder* enc) {
     create_nmmo3_conv_encoder(enc);
 #endif
 #elif defined(PUFFER_MINIMAL)
-#ifdef MINIMAL_ATTN
+#if defined(PUF_METAL) && defined(MINIMAL_ATTN)
+#error "Metal: MINIMAL_ATTN PTX attention encoder is not ported"
+#elif defined(MINIMAL_ATTN)
     create_entity_attn_encoder(enc);
 #else
     create_minimal_encoder(enc);

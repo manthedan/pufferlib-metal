@@ -1,0 +1,1051 @@
+{
+  "schema_version": 2,
+  "requested_steps": 1000000000,
+  "actual_steps": 999817216,
+  "curve_definition": "Four equal-width half-open step bins, arithmetic means of logged snapshots; final eval is separate. Missing episode metrics carry forward as in logfix-report.md.",
+  "runs": [
+    {
+      "backend": "metal",
+      "seed": 42,
+      "steps": 999817216,
+      "epochs": 1907,
+      "training_seconds": 10898.6037940979,
+      "mean_sps": 91738.10103468919,
+      "eval_episodes_observed": 1024,
+      "eval": {
+        "success_rate": 0.0,
+        "episode_return": -4.274562835693359,
+        "grasp_rate": 0.0029296875,
+        "lift_rate": 0.0
+      },
+      "curve": {
+        "mean_steps": [
+          125829120.0,
+          374865920.0,
+          624951296.0,
+          874774528.0
+        ],
+        "success_rate": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "episode_return": [
+          -4.365956222280135,
+          -4.407238120552878,
+          -4.2886162843844176,
+          -4.272446602332492
+        ],
+        "grasp_rate": [
+          0.01263696386210077,
+          0.02003564226755431,
+          0.02893091063454466,
+          0.002409845915991821
+        ],
+        "lift_rate": [
+          0.0008475385513624283,
+          0.00026929275431929927,
+          1.6021049133378942e-06,
+          0.0
+        ],
+        "mean_sps": [
+          104852.4349016749,
+          94495.6862038331,
+          82877.3786610814,
+          90664.84935455488
+        ]
+      },
+      "checkpoint_sha256": "4a1c100a3c8766708b4173f49b5d60e7f7884ac64d99c1323fc895f694e633b2",
+      "checkpoint_bytes": 1652768,
+      "artifact": "build/ra/metal/seed42/logs/robot_arm/metal_seed42.ini",
+      "artifact_sha256": "59938c41b498d28f47c169db282d58cee685228f4b655c90e1ac96be19a196f2",
+      "started_utc": "2026-10-27T04:25:30Z",
+      "runner_observed_end_utc": "2026-10-27T07:27:37Z",
+      "metal_summary": {
+        "epochs": 1906.0,
+        "sps": 91753.0,
+        "train_ms": 642.7,
+        "rollout_ms": 5712.0,
+        "rollout_env_ms": 5278.0,
+        "rollout_model_ms": 437.2,
+        "rollout_copy_ms": 1.613,
+        "dispatches": 2297.0,
+        "commits": 160.9,
+        "cpu_waits": 149.1,
+        "gated_commits": 0.0,
+        "spin_hits": 0.0,
+        "spin_misses": 0.0,
+        "barriers": 2297.0,
+        "cpu_wait_ms": 1068.0,
+        "encode_ms": 499.4,
+        "train_dispatches": 729.0,
+        "train_encode_ms": 486.4,
+        "train_wait_ms": 634.3,
+        "train_gpu_ms": 633.5,
+        "rollout_dispatches": 1536.0,
+        "rollout_encode_ms": 2.749,
+        "rollout_wait_ms": 424.0,
+        "rollout_gpu_ms": 340.8,
+        "epoch_ms": 5714.0,
+        "cpu_cores": 7.328
+      },
+      "thermal": {
+        "samples": 182,
+        "performance_warning_free_samples": 182,
+        "power_watts": null
+      },
+      "training_hours": 3.027389942804972,
+      "eval_counts": {
+        "success_rate": 0,
+        "grasp_rate": 3,
+        "lift_rate": 0
+      }
+    },
+    {
+      "backend": "metal",
+      "seed": 43,
+      "steps": 999817216,
+      "epochs": 1907,
+      "training_seconds": 12356.212949037552,
+      "mean_sps": 80916.15287982534,
+      "eval_episodes_observed": 1024,
+      "eval": {
+        "success_rate": 0.0,
+        "episode_return": -4.269591331481934,
+        "grasp_rate": 0.0390625,
+        "lift_rate": 0.0
+      },
+      "curve": {
+        "mean_steps": [
+          125829120.0,
+          374865920.0,
+          624951296.0,
+          874774528.0
+        ],
+        "success_rate": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "episode_return": [
+          -4.286645290463469,
+          -4.380826299295485,
+          -4.276953393308371,
+          -4.269358205194233
+        ],
+        "grasp_rate": [
+          0.033577685069635384,
+          0.031795682364574925,
+          0.041022776836915964,
+          0.0421104026163983
+        ],
+        "lift_rate": [
+          0.0010503850770591469,
+          8.605401247907703e-05,
+          0.0,
+          0.0
+        ],
+        "mean_sps": [
+          94180.838171641,
+          85618.91596936862,
+          74396.4316303027,
+          75313.58230174164
+        ]
+      },
+      "checkpoint_sha256": "3c510d78ac8d2a183474f1b012b9a43223bf117047dcb1f972fda7ca78bd2fdf",
+      "checkpoint_bytes": 1652768,
+      "artifact": "build/ra/metal/seed43/logs/robot_arm/metal_seed43.ini",
+      "artifact_sha256": "ebb2bdddb09a6f3b4da10a1638d8bb7567c8ad4fcd2f68571836e7b5e35bfa41",
+      "started_utc": "2026-10-27T07:27:37Z",
+      "runner_observed_end_utc": "2026-10-27T10:53:46Z",
+      "metal_summary": {
+        "epochs": 1906.0,
+        "sps": 80923.0,
+        "train_ms": 640.5,
+        "rollout_ms": 6477.0,
+        "rollout_env_ms": 6016.0,
+        "rollout_model_ms": 463.9,
+        "rollout_copy_ms": 1.059,
+        "dispatches": 2297.0,
+        "commits": 160.9,
+        "cpu_waits": 149.2,
+        "gated_commits": 0.0,
+        "spin_hits": 0.0,
+        "spin_misses": 0.0,
+        "barriers": 2297.0,
+        "cpu_wait_ms": 1091.0,
+        "encode_ms": 497.8,
+        "train_dispatches": 729.0,
+        "train_encode_ms": 486.2,
+        "train_wait_ms": 633.0,
+        "train_gpu_ms": 631.3,
+        "rollout_dispatches": 1536.0,
+        "rollout_encode_ms": 3.05,
+        "rollout_wait_ms": 449.8,
+        "rollout_gpu_ms": 364.7,
+        "epoch_ms": 6479.0,
+        "cpu_cores": 7.418
+      },
+      "thermal": {
+        "samples": 206,
+        "performance_warning_free_samples": 206,
+        "power_watts": null
+      },
+      "training_hours": 3.4322813747326535,
+      "eval_counts": {
+        "success_rate": 0,
+        "grasp_rate": 40,
+        "lift_rate": 0
+      }
+    },
+    {
+      "backend": "metal",
+      "seed": 44,
+      "steps": 999817216,
+      "epochs": 1907,
+      "training_seconds": 10809.096007108688,
+      "mean_sps": 92497.76441456919,
+      "eval_episodes_observed": 1024,
+      "eval": {
+        "success_rate": 0.0,
+        "episode_return": -4.263792514801025,
+        "grasp_rate": 0.09765625,
+        "lift_rate": 0.0
+      },
+      "curve": {
+        "mean_steps": [
+          125829120.0,
+          374865920.0,
+          624951296.0,
+          874774528.0
+        ],
+        "success_rate": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "episode_return": [
+          -4.303290523887941,
+          -4.307913012474588,
+          -4.266141902475737,
+          -4.263113965507315
+        ],
+        "grasp_rate": [
+          0.03245502472343219,
+          0.023177714367978962,
+          0.08334582104724471,
+          0.10285637706925138
+        ],
+        "lift_rate": [
+          0.0019412757269521273,
+          0.00029769120744011705,
+          0.0,
+          0.0
+        ],
+        "mean_sps": [
+          104212.20211434552,
+          97290.451379539,
+          88206.28901737527,
+          84797.56303140815
+        ]
+      },
+      "checkpoint_sha256": "ce211cf85d266f75ffa7cd9359a6a2c96ce5fb968a67aeb3a14a0038ce06cd2b",
+      "checkpoint_bytes": 1652768,
+      "artifact": "build/ra/metal/seed44/logs/robot_arm/metal_seed44.ini",
+      "artifact_sha256": "d608e773e2ef7e332a49d694e7f5c5afbf8af47b0f3b4960630140053cf3fb81",
+      "started_utc": "2026-10-27T10:53:46Z",
+      "runner_observed_end_utc": "2026-10-27T13:54:54Z",
+      "metal_summary": {
+        "epochs": 1906.0,
+        "sps": 92514.0,
+        "train_ms": 643.5,
+        "rollout_ms": 5665.0,
+        "rollout_env_ms": 5236.0,
+        "rollout_model_ms": 432.4,
+        "rollout_copy_ms": 1.665,
+        "dispatches": 2297.0,
+        "commits": 160.9,
+        "cpu_waits": 149.1,
+        "gated_commits": 0.0,
+        "spin_hits": 0.0,
+        "spin_misses": 0.0,
+        "barriers": 2297.0,
+        "cpu_wait_ms": 1064.0,
+        "encode_ms": 500.3,
+        "train_dispatches": 729.0,
+        "train_encode_ms": 487.4,
+        "train_wait_ms": 635.3,
+        "train_gpu_ms": 634.3,
+        "rollout_dispatches": 1536.0,
+        "rollout_encode_ms": 2.695,
+        "rollout_wait_ms": 419.1,
+        "rollout_gpu_ms": 336.7,
+        "epoch_ms": 5667.0,
+        "cpu_cores": 7.248
+      },
+      "thermal": {
+        "samples": 181,
+        "performance_warning_free_samples": 181,
+        "power_watts": null
+      },
+      "training_hours": 3.0025266686413024,
+      "eval_counts": {
+        "success_rate": 0,
+        "grasp_rate": 100,
+        "lift_rate": 0
+      }
+    },
+    {
+      "backend": "cuda",
+      "seed": 42,
+      "steps": 999817216,
+      "epochs": 1907,
+      "training_seconds": 6208.809277534485,
+      "mean_sps": 161032.03872241135,
+      "eval_episodes_observed": 1024,
+      "eval": {
+        "success_rate": 0.0,
+        "episode_return": -4.268192768096924,
+        "grasp_rate": 0.0751953125,
+        "lift_rate": 0.0
+      },
+      "curve": {
+        "mean_steps": [
+          125829120.0,
+          374865920.0,
+          624951296.0,
+          874774528.0
+        ],
+        "success_rate": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "episode_return": [
+          -4.363029336324454,
+          -4.3546679574738505,
+          -4.276721544485672,
+          -4.2684849721043046
+        ],
+        "grasp_rate": [
+          0.038073217632134795,
+          0.054889205003653185,
+          0.05157599373441385,
+          0.07486953122243911
+        ],
+        "lift_rate": [
+          0.0031193357884458585,
+          0.0011296616341241203,
+          2.7646533695812996e-05,
+          3.59541445504874e-06
+        ],
+        "mean_sps": [
+          228416.05559292468,
+          165786.61691023095,
+          156493.29541740936,
+          141912.92063939577
+        ]
+      },
+      "checkpoint_sha256": null,
+      "checkpoint_bytes": null,
+      "checkpoint_validation": "Final checkpoint at step 999817216 reported retained on the CUDA reference host; final INI references it. Checkpoint bytes were not copied or independently validated in this update.",
+      "checkpoint_reference": "build/ra/cuda/seed42/checkpoints/robot_arm/cuda_seed42/0000000999817216.bin",
+      "artifact": "build/ra_cuda_final/seed42/logs/robot_arm/cuda_seed42.ini",
+      "artifact_sha256": "c4ab71edea767f903f3a479fac4af3feeae23dcb33d78b8baad86a144a6a5fb2",
+      "started_utc": "2026-10-27T16:51:08Z",
+      "runner_observed_end_utc": "2026-10-27T18:35:11Z",
+      "exit_code": 0,
+      "runner_wall_seconds": 6243.0,
+      "source_artifacts": {
+        "end.txt": {
+          "sha256": "a7ae7858255b54223bfc5ab5ab96f4766e8448c647c123bd88ec234c91f7049d",
+          "bytes": 21
+        },
+        "exit_code.txt": {
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "bytes": 2
+        },
+        "gpu_before.txt": {
+          "sha256": "78f8e06b38c361b7530d10210a782d761b6da720b417866bd71375255f3dbce7",
+          "bytes": 1689
+        },
+        "gpu_wait.txt": {
+          "sha256": "39130244678d864b664bbcf1d572e992cf327fc8d765eed9e23b4d50d74eaa6b",
+          "bytes": 22
+        },
+        "logs/robot_arm/cuda_seed42.ini": {
+          "sha256": "c4ab71edea767f903f3a479fac4af3feeae23dcb33d78b8baad86a144a6a5fb2",
+          "bytes": 6152
+        },
+        "pid.txt": {
+          "sha256": "15df1f9cbf474e664692de799fa7f38879519c4c2b9e1a2d4a2eaf58c18e4c0f",
+          "bytes": 7
+        },
+        "queued.txt": {
+          "sha256": "a8ca2f5afc3cdbfec9526216c8832101a46fba50249e633c4131fef93a7c5e2b",
+          "bytes": 21
+        },
+        "start.txt": {
+          "sha256": "a7421b7753b157d9707424a3fcc39112dd6b79e17f0fa4cec2186bc83ba3af3a",
+          "bytes": 21
+        },
+        "telemetry.txt": {
+          "sha256": "0146b88b99f9ff38d2e282d5da0148a710a84fb8c16f15b50fe5b9a1d4bef028",
+          "bytes": 6378
+        },
+        "train.log": {
+          "sha256": "01d2b2fbf28c0d50f0bc920ed1e971a6cd83f89df2f4b82b858a31f602548ce3",
+          "bytes": 4601488
+        }
+      },
+      "telemetry": {
+        "temperature_c": {
+          "min": 57.0,
+          "mean": 73.3495145631068,
+          "max": 81.0
+        },
+        "power_w": {
+          "min": 236.54,
+          "mean": 272.6619417475728,
+          "max": 393.59
+        },
+        "gpu_percent": {
+          "min": 99.0,
+          "mean": 99.94174757281553,
+          "max": 100.0
+        },
+        "memory_mib": {
+          "min": 1874.0,
+          "mean": 7645.592233009709,
+          "max": 21686.0
+        },
+        "sm_mhz": {
+          "min": 1830.0,
+          "mean": 1892.621359223301,
+          "max": 1950.0
+        }
+      },
+      "telemetry_active_samples": 103,
+      "gpu_admission": "No running processes found in gpu_before.txt",
+      "training_hours": 1.7246692437595792,
+      "eval_counts": {
+        "success_rate": 0,
+        "grasp_rate": 77,
+        "lift_rate": 0
+      }
+    },
+    {
+      "backend": "cuda",
+      "seed": 43,
+      "steps": 999817216,
+      "epochs": 1907,
+      "training_seconds": 6870.948715686798,
+      "mean_sps": 145513.70667595812,
+      "eval_episodes_observed": 1024,
+      "eval": {
+        "success_rate": 0.0,
+        "episode_return": -4.267148971557617,
+        "grasp_rate": 0.1005859375,
+        "lift_rate": 0.0
+      },
+      "curve": {
+        "mean_steps": [
+          125829120.0,
+          374865920.0,
+          624951296.0,
+          874774528.0
+        ],
+        "success_rate": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "episode_return": [
+          -4.292292106983274,
+          -4.343323274728387,
+          -4.2756837179076,
+          -4.267396839726873
+        ],
+        "grasp_rate": [
+          0.05374861930262683,
+          0.049891018677713735,
+          0.06410510575426137,
+          0.0920399143712736
+        ],
+        "lift_rate": [
+          0.003972868546331596,
+          0.0015348018341320927,
+          1.0937589354446036e-05,
+          2.411986552491909e-06
+        ],
+        "mean_sps": [
+          208309.20721186168,
+          137539.29869818783,
+          151184.4139228231,
+          129352.29777422688
+        ]
+      },
+      "checkpoint_sha256": null,
+      "checkpoint_bytes": null,
+      "checkpoint_validation": "Final checkpoint at step 999817216 reported retained on the CUDA reference host; final INI references it. Checkpoint bytes were not copied or independently validated in this update.",
+      "checkpoint_reference": "build/ra/cuda/seed43/checkpoints/robot_arm/cuda_seed43/0000000999817216.bin",
+      "artifact": "build/ra_cuda_final/seed43/logs/robot_arm/cuda_seed43.ini",
+      "artifact_sha256": "7a493dfa0d2d0e55aefae968c17da30df1dd69e5c1e685f9ceffb57fe122a677",
+      "started_utc": "2026-10-27T18:37:11Z",
+      "runner_observed_end_utc": "2026-10-27T20:32:14Z",
+      "exit_code": 0,
+      "runner_wall_seconds": 6903.0,
+      "source_artifacts": {
+        "end.txt": {
+          "sha256": "981e4c7943df91b8aff8779999fed189265e059a62c85d9ebd13a7c07f855504",
+          "bytes": 21
+        },
+        "exit_code.txt": {
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "bytes": 2
+        },
+        "gpu_before.txt": {
+          "sha256": "ff9275cb79dca342be23368b1885bcf2c1a0e7ddde8e088df369d2c5711aa907",
+          "bytes": 1689
+        },
+        "gpu_wait.txt": {
+          "sha256": "9bfb8b242f5550b0a0d647179960910e649b10ce5ed9e623905c2c7bbea7bcc7",
+          "bytes": 78
+        },
+        "logs/robot_arm/cuda_seed43.ini": {
+          "sha256": "7a493dfa0d2d0e55aefae968c17da30df1dd69e5c1e685f9ceffb57fe122a677",
+          "bytes": 6192
+        },
+        "pid.txt": {
+          "sha256": "2b9aaf4bfe49ee593624f91a9808c87e14921f0d7508070da1f2e7849fb86ad0",
+          "bytes": 7
+        },
+        "queued.txt": {
+          "sha256": "a7ae7858255b54223bfc5ab5ab96f4766e8448c647c123bd88ec234c91f7049d",
+          "bytes": 21
+        },
+        "start.txt": {
+          "sha256": "471e35e2d124fe762aea9029a087a3a004b859340b797754129fdd9bed8134f1",
+          "bytes": 21
+        },
+        "telemetry.txt": {
+          "sha256": "72413249d80e29caf3f3ca54d1b4b0f7e4adf77f1e1e9470dae2ad7509f17e91",
+          "bytes": 7077
+        },
+        "train.log": {
+          "sha256": "b16c4b461000de927f01bbb13a159c9e35a66e803eb726d692818832168d7625",
+          "bytes": 4577178
+        }
+      },
+      "telemetry": {
+        "temperature_c": {
+          "min": 70.0,
+          "mean": 73.76315789473684,
+          "max": 81.0
+        },
+        "power_w": {
+          "min": 240.64,
+          "mean": 270.0914912280702,
+          "max": 348.64
+        },
+        "gpu_percent": {
+          "min": 99.0,
+          "mean": 99.98245614035088,
+          "max": 100.0
+        },
+        "memory_mib": {
+          "min": 1874.0,
+          "mean": 9443.61403508772,
+          "max": 23823.0
+        },
+        "sm_mhz": {
+          "min": 1860.0,
+          "mean": 1902.7631578947369,
+          "max": 1920.0
+        }
+      },
+      "telemetry_active_samples": 114,
+      "gpu_admission": "No running processes found in gpu_before.txt",
+      "training_hours": 1.908596865468555,
+      "eval_counts": {
+        "success_rate": 0,
+        "grasp_rate": 103,
+        "lift_rate": 0
+      }
+    },
+    {
+      "backend": "cuda",
+      "seed": 44,
+      "steps": 999817216,
+      "epochs": 1907,
+      "training_seconds": 6662.773232936859,
+      "mean_sps": 150060.21982820722,
+      "eval_episodes_observed": 1024,
+      "eval": {
+        "success_rate": 0.0,
+        "episode_return": -4.27063512802124,
+        "grasp_rate": 0.0791015625,
+        "lift_rate": 0.0
+      },
+      "curve": {
+        "mean_steps": [
+          125829120.0,
+          374865920.0,
+          624951296.0,
+          874774528.0
+        ],
+        "success_rate": [
+          0.0021141649048625794,
+          7.05870697704345e-07,
+          0.0,
+          0.0
+        ],
+        "episode_return": [
+          -4.341244536020791,
+          -4.334146300701725,
+          -4.2726991251579625,
+          -4.268709717678423
+        ],
+        "grasp_rate": [
+          0.045419799558223714,
+          0.042808890724417986,
+          0.07061801615719775,
+          0.08465099658331826
+        ],
+        "lift_rate": [
+          0.007804300839533778,
+          0.0009150867635580424,
+          1.411951467711127e-05,
+          2.491084166397458e-05
+        ],
+        "mean_sps": [
+          189881.43656642694,
+          145628.60497809603,
+          156201.0991247911,
+          143913.12012911544
+        ]
+      },
+      "checkpoint_sha256": null,
+      "checkpoint_bytes": null,
+      "checkpoint_validation": "Final checkpoint at step 999817216 reported retained on the CUDA reference host; final INI references it. Checkpoint bytes were not copied or independently validated in this update.",
+      "checkpoint_reference": "build/ra/cuda/seed44/checkpoints/robot_arm/cuda_seed44/0000000999817216.bin",
+      "artifact": "build/ra_cuda_final/seed44/logs/robot_arm/cuda_seed44.ini",
+      "artifact_sha256": "950fdd2dc755d23de2a887d6146488b567c8cc40b7c122b2a308c4964eada77e",
+      "started_utc": "2026-10-27T20:38:14Z",
+      "runner_observed_end_utc": "2026-10-27T22:30:18Z",
+      "exit_code": 0,
+      "runner_wall_seconds": 6724.0,
+      "source_artifacts": {
+        "end.txt": {
+          "sha256": "bc44c111756bb12d994afcf71a5c318e2be699a838dad104c570f76765fb425c",
+          "bytes": 21
+        },
+        "exit_code.txt": {
+          "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+          "bytes": 2
+        },
+        "gpu_before.txt": {
+          "sha256": "76f63564a5ef04839ea9ea1c47f65c8e031af2abeb13009ffa5ba3152b78ff70",
+          "bytes": 1689
+        },
+        "gpu_wait.txt": {
+          "sha256": "7e36478e8b9bfae16f01163f896cd506298e3481b53742f25128bfc1c9936ca7",
+          "bytes": 190
+        },
+        "logs/robot_arm/cuda_seed44.ini": {
+          "sha256": "950fdd2dc755d23de2a887d6146488b567c8cc40b7c122b2a308c4964eada77e",
+          "bytes": 6348
+        },
+        "pid.txt": {
+          "sha256": "13ce1166ced8f434c190f06f2c2ca0b7032f139d24bdfd15d28ce24ff545892a",
+          "bytes": 7
+        },
+        "queued.txt": {
+          "sha256": "981e4c7943df91b8aff8779999fed189265e059a62c85d9ebd13a7c07f855504",
+          "bytes": 21
+        },
+        "start.txt": {
+          "sha256": "aac4c148259b0928b911e5867b698cd0db2bf99779f80a56dc1064b85c0ad434",
+          "bytes": 21
+        },
+        "telemetry.txt": {
+          "sha256": "a31cbb36f924167b894bc2378e5e54b1219065f7f98382a0a83e609861446d20",
+          "bytes": 6915
+        },
+        "train.log": {
+          "sha256": "22a21f818029a855321251ca98f3654dfcd1e7fa5843a7cb0e40ec90b780a95f",
+          "bytes": 4615853
+        }
+      },
+      "telemetry": {
+        "temperature_c": {
+          "min": 72.0,
+          "mean": 75.1891891891892,
+          "max": 82.0
+        },
+        "power_w": {
+          "min": 246.57,
+          "mean": 282.038018018018,
+          "max": 356.22
+        },
+        "gpu_percent": {
+          "min": 99.0,
+          "mean": 99.98198198198199,
+          "max": 100.0
+        },
+        "memory_mib": {
+          "min": 1874.0,
+          "mean": 11455.891891891892,
+          "max": 21153.0
+        },
+        "sm_mhz": {
+          "min": 1845.0,
+          "mean": 1901.3513513513512,
+          "max": 1905.0
+        }
+      },
+      "telemetry_active_samples": 111,
+      "gpu_admission": "No running processes found in gpu_before.txt",
+      "training_hours": 1.8507703424824609,
+      "eval_counts": {
+        "success_rate": 0,
+        "grasp_rate": 81,
+        "lift_rate": 0
+      }
+    }
+  ],
+  "pending": [],
+  "primary_seeds_summary": {
+    "metal": {
+      "success_rate": {
+        "mean": 0.0,
+        "sample_sd": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "episode_return": {
+        "mean": -4.2693155606587725,
+        "sample_sd": 0.00539045361645396,
+        "min": -4.274562835693359,
+        "max": -4.263792514801025
+      },
+      "grasp_rate": {
+        "mean": 0.046549479166666664,
+        "sample_sd": 0.04780503690562509,
+        "min": 0.0029296875,
+        "max": 0.09765625
+      },
+      "lift_rate": {
+        "mean": 0.0,
+        "sample_sd": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "training_seconds": {
+        "mean": 11354.637583414713,
+        "sample_sd": 868.5435053869312,
+        "min": 10809.096007108688,
+        "max": 12356.212949037552
+      },
+      "training_hours": {
+        "mean": 3.154065995392976,
+        "sample_sd": 0.24126208482970327,
+        "min": 3.0025266686413024,
+        "max": 3.4322813747326535
+      },
+      "mean_sps": {
+        "mean": 88384.00610969457,
+        "sample_sd": 6478.49488769065,
+        "min": 80916.15287982534,
+        "max": 92497.76441456919
+      },
+      "n": 3,
+      "total_training_hours": 9.462197986178928
+    },
+    "cuda": {
+      "success_rate": {
+        "mean": 0.0,
+        "sample_sd": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "episode_return": {
+        "mean": -4.268658955891927,
+        "sample_sd": 0.0017892233000306823,
+        "min": -4.27063512802124,
+        "max": -4.267148971557617
+      },
+      "grasp_rate": {
+        "mean": 0.0849609375,
+        "sample_sd": 0.013671875,
+        "min": 0.0751953125,
+        "max": 0.1005859375
+      },
+      "lift_rate": {
+        "mean": 0.0,
+        "sample_sd": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "training_seconds": {
+        "mean": 6580.843742052714,
+        "sample_sd": 338.58749238057607,
+        "min": 6208.809277534485,
+        "max": 6870.948715686798
+      },
+      "training_hours": {
+        "mean": 1.8280121505701983,
+        "sample_sd": 0.09405208121682665,
+        "min": 1.7246692437595792,
+        "max": 1.908596865468555
+      },
+      "mean_sps": {
+        "mean": 152201.9884088589,
+        "sample_sd": 7977.783957076949,
+        "min": 145513.70667595812,
+        "max": 161032.03872241135
+      },
+      "n": 3,
+      "total_training_hours": 5.484036451710595
+    }
+  },
+  "all_seeds_summary": {
+    "metal": {
+      "success_rate": {
+        "mean": 0.0,
+        "sample_sd": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "episode_return": {
+        "mean": -4.2693155606587725,
+        "sample_sd": 0.00539045361645396,
+        "min": -4.274562835693359,
+        "max": -4.263792514801025
+      },
+      "grasp_rate": {
+        "mean": 0.046549479166666664,
+        "sample_sd": 0.04780503690562509,
+        "min": 0.0029296875,
+        "max": 0.09765625
+      },
+      "lift_rate": {
+        "mean": 0.0,
+        "sample_sd": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "training_seconds": {
+        "mean": 11354.637583414713,
+        "sample_sd": 868.5435053869312,
+        "min": 10809.096007108688,
+        "max": 12356.212949037552
+      },
+      "training_hours": {
+        "mean": 3.154065995392976,
+        "sample_sd": 0.24126208482970327,
+        "min": 3.0025266686413024,
+        "max": 3.4322813747326535
+      },
+      "mean_sps": {
+        "mean": 88384.00610969457,
+        "sample_sd": 6478.49488769065,
+        "min": 80916.15287982534,
+        "max": 92497.76441456919
+      },
+      "n": 3,
+      "total_training_hours": 9.462197986178928
+    },
+    "cuda": {
+      "success_rate": {
+        "mean": 0.0,
+        "sample_sd": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "episode_return": {
+        "mean": -4.268658955891927,
+        "sample_sd": 0.0017892233000306823,
+        "min": -4.27063512802124,
+        "max": -4.267148971557617
+      },
+      "grasp_rate": {
+        "mean": 0.0849609375,
+        "sample_sd": 0.013671875,
+        "min": 0.0751953125,
+        "max": 0.1005859375
+      },
+      "lift_rate": {
+        "mean": 0.0,
+        "sample_sd": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "training_seconds": {
+        "mean": 6580.843742052714,
+        "sample_sd": 338.58749238057607,
+        "min": 6208.809277534485,
+        "max": 6870.948715686798
+      },
+      "training_hours": {
+        "mean": 1.8280121505701983,
+        "sample_sd": 0.09405208121682665,
+        "min": 1.7246692437595792,
+        "max": 1.908596865468555
+      },
+      "mean_sps": {
+        "mean": 152201.9884088589,
+        "sample_sd": 7977.783957076949,
+        "min": 145513.70667595812,
+        "max": 161032.03872241135
+      },
+      "n": 3,
+      "total_training_hours": 5.484036451710595
+    }
+  },
+  "verdict": "No detected learning-quality gap at this budget; equivalence not established; neither backend solves the default task.",
+  "verdict_reason": "All six seeds completed 999817216 training steps and exactly 1024 final evaluation episodes. All success and lift rates are zero. Return and grasp differences are not significant in exploratory two-sided seed-level tests; n=3 per backend cannot establish equivalence or rule out important differences.",
+  "source_commit": "5f0bede592e67aeee04a7daf58c02dd8358a012c",
+  "hardware": {
+    "metal": "Mac mini M4, 10 CPU cores, 16 GiB, macOS 27.0.1 (26A434)",
+    "cuda": "The CUDA reference host: RTX 3090, CUDA 12.8"
+  },
+  "config_sha256": {
+    "default.ini": "7f493977f49f2537a59c18c2a283f062e5d6063d9e130c2d15f6be075cda1084",
+    "robot_arm.ini": "b207726ed51ea222f49d6f39bda90b854a3d60757e3ffccc5f7131c3e488a461"
+  },
+  "metal_binary_sha256": "94dd701acca146d35161c7095b35461a7126b18a316095b7d663e5a7a4befd01",
+  "cuda_original_trainer_sha256": "d8e514406f01b5139d4c196b7cefb391a47e22a80c328a21bd14c5deb66b10ec",
+  "cuda_logfix_trainer_sha256": "b67c25d944b7b1137bfbdce47ecc10f3063e84804235ab43fb17dabde94cfed7",
+  "cuda_logfix_patch_sha256": "671fd2d77f57a0eadc731368f676bdf5a48f49df4e279cafeda48967753cc0f7",
+  "overrides": {
+    "base.seed": [
+      42,
+      43,
+      44
+    ],
+    "base.eval_episodes": 1024,
+    "base.eval_agents": 1024,
+    "base.profile": 1,
+    "PUF_ENV_THREADS": "10 on Metal only; unset on CUDA",
+    "output_paths": "build/ra/{backend}/seed{seed}/{logs,checkpoints}",
+    "base.run_id": "{backend}_seed{seed}",
+    "cuda_nice": 19,
+    "copied_cuda_artifacts": "build/ra_cuda_final/seed{seed}"
+  },
+  "cuda_status": {
+    "status": "complete",
+    "seeds": [
+      42,
+      43,
+      44
+    ],
+    "exit_codes": [
+      0,
+      0,
+      0
+    ],
+    "checkpoint_steps": 999817216,
+    "checkpoint_location": "The CUDA reference host",
+    "checkpoint_validation": "Not copied; existence at the final step supplied by the experiment operator, not independently verified here.",
+    "interrupted_attempts": [
+      {
+        "seed": 42,
+        "started_utc": "2026-10-27T04:27:42Z",
+        "last_logged_epoch": 671,
+        "last_logged_steps": 351797248,
+        "reason": "SSH reported termination by signal; no final evaluation or completion marker."
+      },
+      {
+        "seed": 42,
+        "started_utc": "2026-10-27T06:51:39Z",
+        "last_logged_epoch": 422,
+        "last_logged_steps": 221249536,
+        "reason": "Stopped externally; no final evaluation or completion marker."
+      }
+    ],
+    "partial_attempts_used_in_comparison": false,
+    "optional_seeds_45_46": "not run"
+  },
+  "measurement_notes": {
+    "history": "Arithmetic means of logged snapshots, not episode-weighted; missing episode metrics carry forward. Final evaluation is separate.",
+    "replication_unit": "Training seed (n=3 per backend), not 3072 independent policies. Environment initial seeds are agent index + 1 independently of base.seed. Equal seed labels do not imply identical stochastic streams across backends.",
+    "thermal": "pmset reported no thermal or performance warnings in all 569 sampled Metal observations. This does not establish absence of power/frequency capping.",
+    "metal_power_watts": null,
+    "power": "AC power, low-power mode off; no privileged power measurement or external wattmeter.",
+    "background_activity": "No additional heavy jobs launched by this experiment on the mini. OS background activity remained possible; ANECompilerService was active in the postrun process snapshot.",
+    "mean_sps": "Actual steps / final saved training uptime on each backend, excluding final evaluation and runner polling. CUDA graph-capture setup is excluded from trainer uptime. Neither final snapshot SPS nor an average of bin SPS is used.",
+    "cuda_background_activity": "The experiment operator reports the CUDA reference host was otherwise idle except possibly at the very end. Pre-run GPU snapshots show no running processes. Telemetry alone does not establish exclusivity throughout training; no intervals were removed.",
+    "cuda_telemetry": "Minute-level device samples with utilization > 0, matching the existing collector; these are device-wide samples, not workload-attributed power measurements.",
+    "training_success": "CUDA seed 44 has nonzero success snapshot means in bins 1 and 2 (0.0021141649048625794 and 7.05870697704345e-7 as fractions). All other success bins and all six final success evaluations are zero. Training bin means are not pooled episode rates."
+  },
+  "artifact_storage": {
+    "raw_cuda_bytes": 13839154,
+    "sum_individually_gzipped_cuda_bytes": 522132,
+    "committed_raw_cuda_files": false,
+    "policy": "Raw artifacts stay under ignored build/ra_cuda_final; parsed summaries, curves and source hashes are stored in this JSON."
+  },
+  "statistical_comparison": {
+    "unit": "training seed",
+    "n_metal": 3,
+    "n_cuda": 3,
+    "difference_direction": "Metal minus CUDA",
+    "alternative": "two-sided",
+    "exploratory": true,
+    "multiplicity_adjustment": "none",
+    "implementation": "SciPy 1.18.1: ttest_ind(equal_var=False), mannwhitneyu(method=exact); rank p-values independently enumerated over all 20 assignments.",
+    "caveats": "Independent-sample tests; normality is untestable with n=3. Seed labels do not guarantee paired random streams. Non-rejection is not equivalence or a probability that distributions are identical. Exact two-sided rank p-values cannot be below 0.1 with 3+3 untied observations.",
+    "metrics": {
+      "success_rate": {
+        "mean_difference": 0.0,
+        "welch": null,
+        "mann_whitney": null,
+        "reason": "All observations are zero; no between-seed variance for a meaningful Welch test. Report descriptively; no equivalence inference."
+      },
+      "episode_return": {
+        "mean_difference": -0.0006566047668457031,
+        "welch": {
+          "t": -0.20023677950163105,
+          "df": 2.4354102081940905,
+          "p": 0.8568085191034943,
+          "mean_difference_95_ci": [
+            -0.012603844409031206,
+            0.0112906348753398
+          ]
+        },
+        "mann_whitney": {
+          "u_metal": 4.0,
+          "p_exact": 1.0
+        }
+      },
+      "grasp_rate": {
+        "mean_difference": -0.038411458333333336,
+        "welch": {
+          "t": -1.3380611391822836,
+          "df": 2.3249923477916905,
+          "p": 0.29669219210602926,
+          "mean_difference_95_ci": [
+            -0.14677143234090703,
+            0.06994851567424037
+          ]
+        },
+        "mann_whitney": {
+          "u_metal": 2.0,
+          "p_exact": 0.4
+        }
+      },
+      "lift_rate": {
+        "mean_difference": 0.0,
+        "welch": null,
+        "mann_whitney": null,
+        "reason": "All observations are zero; no between-seed variance for a meaningful Welch test. Report descriptively; no equivalence inference."
+      }
+    },
+    "grasp_distribution_assessment": "A common distribution remains plausible (exact Mann-Whitney p=0.4; Welch p=0.29669219210602926), but n=3 per backend has very low power and does not establish equivalence or rule out a meaningful grasp gap."
+  }
+}

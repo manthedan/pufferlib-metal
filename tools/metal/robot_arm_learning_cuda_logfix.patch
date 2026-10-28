@@ -1,0 +1,68 @@
+--- src/pufferl.cu
++++ build/ra/pufferl-logfix.cu
+@@ -2440,2 +2440,13 @@
+-// Bin-mean of history[key] over agent_steps into out[0..points-1]. Dense keys.
+-// points==1 → last value only. Last bin forced to final sample.
++// Refresh trainer fields even when no episodes completed. Only absent fields
++// (normally env/* episode statistics) carry forward from the previous log.
++static void puf_log_snapshot_update(Dict* snapshot, Dict* log) {
++    for (int i = 0; i < log->size; i++) {
++        dict_set(snapshot, log->items[i].key, log->items[i].value);
++    }
++}
++
++// points-1 equal-width bins [j*w, (j+1)*w), w=final_steps/(points-1),
++// followed by the exact final snapshot. Empty bins carry the last non-empty
++// bin's mean; leading empty bins use the first observed value of the key.
++// Absent keys do not contribute samples. History has ordered agent_steps.
++// points==1 returns only the final value (also valid for zero final_steps).
+@@ -2453 +2464,8 @@
+-    double fallback = dict_get(&h->items[0], key);
++    double fallback = dict_get(&h->items[h->size - 1], key);
++    for (int i = 0; i < h->size; i++) {
++        DictItem* item = dict_find(&h->items[i], key);
++        if (item) {
++            fallback = item->value;
++            break;
++        }
++    }
+@@ -2457 +2475,13 @@
+-        bin_sum += dict_get(log, key);
++        DictItem* item = dict_find(log, key);
++        if (!item) continue;
++        double steps = dict_get(log, "agent_steps");
++        // Close ALL preceding bins before assigning this sample. In particular,
++        // a late sample must never be pulled backward into an earlier empty bin.
++        while (out_idx < points - 1 && steps >= next_bin) {
++            fallback = bin_n ? bin_sum / bin_n : fallback;
++            out[out_idx++] = fallback;
++            bin_n = 0;
++            bin_sum = 0;
++            next_bin = final_steps * (out_idx + 1) / (points - 1);
++        }
++        bin_sum += item->value;
+@@ -2459,9 +2488,0 @@
+-        double steps = dict_get(log, "agent_steps");
+-        if (steps < next_bin || out_idx >= points - 1) {
+-            continue;
+-        }
+-        fallback = bin_n ? bin_sum / bin_n : fallback;
+-        out[out_idx++] = fallback;
+-        bin_n = 0;
+-        bin_sum = 0;
+-        next_bin += final_steps / (points - 1);
+@@ -3205,2 +3225,0 @@
+-        // n=0 logs omit env/*; keep last complete-episode snapshot.
+-        int episodes = dict_get(&new_log, "env/n") > 0;
+@@ -3212,9 +3231,2 @@
+-        if (episodes || !last_log.size) {
+-            dict_clear(&last_log);
+-            dict_copy(&last_log, &new_log);
+-        } else {
+-            dict_set(&last_log, "uptime", result.cost);
+-            dict_set(&last_log, "agent_steps", result.steps);
+-        }
+-        // Wait until the objective appears; do not treat negative values as missing.
+-        if (episodes && dict_find(&new_log, target_key)) {
++        puf_log_snapshot_update(&last_log, &new_log);
++        if (dict_find(&last_log, target_key)) {

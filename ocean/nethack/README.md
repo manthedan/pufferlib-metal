@@ -3,13 +3,16 @@
 PufferLib environment for NetHack 3.6.6 over
 [fast-nle](https://github.com/FinlaySanders/fast-nle): 26-verb factored
 action space (verb, item slot, direction, spell slot), legality masking,
-decomposed-score reward, custom CUDA encoder/decoder (`ocean/nethack/nethack.cu`).
+decomposed-score reward, custom encoder/decoder (CUDA and Metal adapters) (`ocean/nethack/nethack.cu`).
 
 ## Setup
 
+Use the [Metal prerequisites](../../docs/metal-guide.md#requirements), plus Git,
+CMake, make, flex, bison and m4 for fast-nle. The first build downloads the engine.
+The environment is compiled into the binary; add `--float` for FP32.
+
 ```bash
-pip install -e .
-./build.sh nethack    # clones + builds vendor/fast-nle, then the training backend
+./build.sh nethack --metal    # clones + builds vendor/fast-nle, then the training backend
 ```
 
 Run from the repo root — the engine finds its data at
@@ -18,7 +21,7 @@ Run from the repo root — the engine finds its data at
 ## Train
 
 ```bash
-./puffer train nethack
+./puffer train
 ```
 
 Reward coefficients and hypers live in `config/nethack.ini`.
@@ -26,7 +29,7 @@ Reward coefficients and hypers live in `config/nethack.ini`.
 ## Watch a policy
 
 ```bash
-./build.sh nethack --fast    # builds the ./nethack demo binary
+./build.sh nethack --cpu    # builds the ./nethack demo binary
 ./nethack                    # interactive TTY demo
 NH_WEIGHTS=checkpoints/nethack/<run>/<step>.bin ./nethack
 ```
@@ -52,7 +55,7 @@ engine tty map. Set `NH_SEED` to replay a seed.
 GPU eval (same stack as training rollouts):
 
 ```bash
-./puffer eval nethack --load-model-path=latest
+./puffer eval latest
 # or pin a run:
-./puffer eval nethack --load-model-path=checkpoints/nethack/<run>/<step>.bin
+./puffer eval checkpoints/nethack/<run>/<step>.bin
 ```

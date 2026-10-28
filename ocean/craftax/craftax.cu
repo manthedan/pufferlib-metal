@@ -14,6 +14,7 @@ static constexpr int CX_CONCAT = CX_MAP_EMB + CX_NUM_SCALARS;    // 1635
 static constexpr int CX_EMBED_N = CX_VOCAB_TOTAL * CX_EMB_DIM;   // 2464
 static_assert(CX_MAP_FLOATS + CX_NUM_SCALARS == OBS_SIZE,
     "craftax encoder expects packed 9x11x8+51 observations");
+#ifndef PUF_METAL  // Metal: src/metal/kernels_envs.h + shaders/envs_craftax.metal
 // Per-channel base offset into the shared embedding table (vocab caps:
 // block<64, item+1<8, visible<2, mob+1<16).
 __constant__ int CX_OFFSETS[CX_CHANNELS] = {0, 64, 72, 74, 90, 106, 122, 138};
@@ -94,6 +95,8 @@ __global__ void craftax_embed_bag_backward_kernel(
     }
 }
 
+#endif  // PUF_METAL
+
 struct CraftaxEncoderWeights {
     Prec embed_w, proj_w;
     int obs_size, hidden;
@@ -112,9 +115,9 @@ static Prec craftax_encoder_forward(
     int B = input.shape[0];
     if (a->saved_obs.data) puf_copy(&a->saved_obs, &input, stream);
 
-    craftax_embed_bag_kernel<<<grid_size(B * CX_NUM_CELLS * CX_EMB_DIM), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(craftax_embed_bag_kernel, grid_size(B * CX_NUM_CELLS * CX_EMB_DIM), BLOCK_SIZE, 0, stream)(
         a->concat.data, input.data, ew->embed_w.data, B, ew->obs_size);
-    craftax_copy_scalars_kernel<<<grid_size(B * CX_NUM_SCALARS), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(craftax_copy_scalars_kernel, grid_size(B * CX_NUM_SCALARS), BLOCK_SIZE, 0, stream)(
         a->concat.data, input.data, B, ew->obs_size);
 
     puf_mm(&a->concat, &ew->proj_w, &a->out, stream);
@@ -139,10 +142,10 @@ static void craftax_encoder_backward(
     if (blocks > 2048) {
         blocks = 2048;
     }
-    craftax_embed_bag_backward_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(craftax_embed_bag_backward_kernel, blocks, BLOCK_SIZE, 0, stream)(
         (long long*)a->embed_wgrad_i.data, grad_concat.data, a->saved_obs.data,
         B, ew->obs_size);
-    craftax_fxp_to_precision_kernel<<<grid_size(CX_EMBED_N), BLOCK_SIZE, 0, stream>>>(
+    PUF_LAUNCH(craftax_fxp_to_precision_kernel, grid_size(CX_EMBED_N), BLOCK_SIZE, 0, stream)(
         a->embed_wgrad.data, (long long*)a->embed_wgrad_i.data, CX_EMBED_N);
 }
 

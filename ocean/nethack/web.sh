@@ -5,10 +5,8 @@
 set -e
 NLE_DIR="vendor/fast-nle"
 WEB_LIB_DIR="$NLE_DIR/build-web"
-if [ ! -d "$NLE_DIR/src" ]; then
-    echo "Cloning fast-nle ..."
-    git clone --depth 1 "https://github.com/FinlaySanders/fast-nle.git" "$NLE_DIR"
-fi
+source tools/build_dependencies.sh
+fetch_fast_nle "$NLE_DIR"
 if [ ! -f "$WEB_LIB_DIR/libnethack.a" ]; then
     echo "Building the NetHack engine for wasm (emcmake) ..."
     emcmake cmake -S "$NLE_DIR" -B "$WEB_LIB_DIR" -DCMAKE_BUILD_TYPE=Release
